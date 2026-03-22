@@ -1,0 +1,8 @@
+{
+  "lock_input_hash": "sha256:d51a23e3deb2c54157ff40a3c61c363797640398472e1daa6dde2779eb775152",
+  "lock_version": 1,
+  "locked_at": "2026-03-22T08:18:25.623371+00:00",
+  "other_inputs_hash": "sha256:258ddeafdc4eb90f37b05f8dbef3e7d4912ea04110218d8f85fd4706ea91fa00",
+  "requirements_hash": "sha256:47961ba7ea6f4fcbc49fe05332fb54541fb3ffca26ea2794e38143f63d14c981",
+  "version_inputs_hash": "sha256:537b364b03343067da9467bf7275953bfbe665cd4319ded7c527ac802bce549b"
+}

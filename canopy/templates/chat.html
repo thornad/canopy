@@ -1,0 +1,1777 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Canopy</title>
+
+    <!-- Fonts -->
+    <link rel="stylesheet" href="/static/fonts/inter/inter.css">
+
+    <!-- Markdown rendering -->
+    <script src="/static/js/purify.min.js"></script>
+    <script src="/static/js/marked.umd.js"></script>
+    <script src="/static/js/marked-highlight.umd.js"></script>
+
+    <!-- Code highlighting -->
+    <link rel="stylesheet" id="hljs-light-theme" href="/static/css/hljs-github.min.css">
+    <link rel="stylesheet" id="hljs-dark-theme" href="/static/css/hljs-github-dark.min.css" disabled>
+    <script src="/static/js/highlight.min.js"></script>
+    <script src="/static/js/hljs-python.min.js"></script>
+    <script src="/static/js/hljs-javascript.min.js"></script>
+    <script src="/static/js/hljs-bash.min.js"></script>
+    <script src="/static/js/hljs-json.min.js"></script>
+
+    <!-- Math rendering -->
+    <link rel="stylesheet" href="/static/css/katex.min.css">
+    <script defer src="/static/js/katex.min.js"></script>
+    <script defer src="/static/js/katex-auto-render.min.js"></script>
+
+    <!-- Icons -->
+    <script src="/static/js/lucide.min.js"></script>
+
+    <!-- Alpine.js -->
+    <script defer src="/static/js/alpine.min.js"></script>
+
+    <style>
+        /* === CSS Variables === */
+        :root {
+            --bg-primary: #ffffff;
+            --bg-secondary: #f8fafc;
+            --bg-tertiary: #f1f5f9;
+            --text-primary: #0f172a;
+            --text-secondary: #475569;
+            --text-tertiary: #64748b;
+            --text-muted: #94a3b8;
+            --border-faint: #e2e8f0;
+            --border-normal: #cbd5e1;
+            --code-bg: #f3f4f6;
+            --btn-primary: #171717;
+            --btn-primary-hover: #27272a;
+            --btn-primary-text: #ffffff;
+            --accent: #059669;
+            --accent-light: #d1fae5;
+            --danger: #ef4444;
+            --danger-bg: rgba(239, 68, 68, 0.1);
+        }
+
+        [data-theme="dark"] {
+            --bg-primary: #1a1a1e;
+            --bg-secondary: #222226;
+            --bg-tertiary: #2a2a2f;
+            --text-primary: #efefef;
+            --text-secondary: #a1a1aa;
+            --text-tertiary: #71717a;
+            --text-muted: #52525b;
+            --border-faint: #3f3f46;
+            --border-normal: #52525b;
+            --code-bg: #27272a;
+            --btn-primary: #e5e5e5;
+            --btn-primary-hover: #d4d4d4;
+            --btn-primary-text: #18181b;
+            --accent: #34d399;
+            --accent-light: #064e3b;
+            --danger: #f87171;
+            --danger-bg: rgba(239, 68, 68, 0.2);
+        }
+
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+
+        body {
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+            background: var(--bg-primary);
+            color: var(--text-primary);
+            height: 100vh;
+            overflow: hidden;
+        }
+
+        /* === Scrollbar === */
+        .custom-scrollbar::-webkit-scrollbar { width: 6px; }
+        .custom-scrollbar::-webkit-scrollbar-track { background: transparent; }
+        .custom-scrollbar::-webkit-scrollbar-thumb { background: var(--border-normal); border-radius: 3px; }
+
+        /* === Layout === */
+        .app { display: flex; height: 100vh; }
+
+        /* === Sidebar === */
+        .sidebar {
+            width: 260px; min-width: 260px;
+            background: var(--bg-secondary);
+            border-right: 1px solid var(--border-faint);
+            display: flex; flex-direction: column;
+            transition: all 0.25s ease;
+        }
+        .sidebar.hidden { width: 0; min-width: 0; overflow: hidden; }
+        .sidebar-header { padding: 16px; border-bottom: 1px solid var(--border-faint); }
+        .sidebar-header h1 { font-size: 16px; font-weight: 600; display: flex; align-items: center; gap: 8px; }
+        .sidebar-header .badge {
+            font-size: 10px; font-weight: 500; padding: 2px 6px;
+            background: var(--accent-light); color: var(--accent);
+            border-radius: 10px;
+        }
+
+        .new-chat-btn {
+            margin: 12px; padding: 8px 12px;
+            background: var(--bg-tertiary);
+            border: 1px solid var(--border-faint);
+            border-radius: 8px; cursor: pointer;
+            display: flex; align-items: center; gap: 8px;
+            font-size: 13px; color: var(--text-primary);
+            transition: background 0.15s;
+        }
+        .new-chat-btn:hover { background: var(--border-faint); }
+
+        .conv-list { flex: 1; overflow-y: auto; padding: 4px 8px; }
+        .conv-item {
+            padding: 8px 12px; border-radius: 8px; cursor: pointer;
+            font-size: 13px; color: var(--text-primary);
+            display: flex; align-items: center; gap: 8px;
+            margin-bottom: 2px; position: relative;
+            transition: background 0.1s;
+        }
+        .conv-item:hover { background: var(--bg-tertiary); }
+        .conv-item.active { background: var(--bg-tertiary); }
+        .conv-item .conv-title { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .conv-item .delete-btn {
+            opacity: 0; background: none; border: none; cursor: pointer;
+            color: var(--danger); padding: 4px; border-radius: 4px;
+            transition: opacity 0.15s;
+        }
+        .conv-item:hover .delete-btn { opacity: 1; }
+        .conv-item .delete-btn:hover { background: var(--danger-bg); }
+
+        .sidebar-footer {
+            padding: 8px; border-top: 1px solid var(--border-faint);
+        }
+        .sidebar-footer button {
+            width: 100%; padding: 6px 8px; font-size: 12px;
+            background: none; border: none; cursor: pointer;
+            color: var(--text-tertiary); border-radius: 6px;
+            display: flex; align-items: center; gap: 6px;
+            transition: background 0.1s;
+        }
+        .sidebar-footer button:hover { background: var(--bg-tertiary); }
+
+        /* === Main content === */
+        .main { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+
+        /* Header */
+        .header {
+            height: 52px; padding: 0 16px;
+            border-bottom: 1px solid var(--border-faint);
+            display: flex; align-items: center; justify-content: space-between;
+            background: var(--bg-primary); flex-shrink: 0;
+        }
+        .header-left { display: flex; align-items: center; gap: 8px; }
+        .icon-btn {
+            width: 32px; height: 32px; display: flex; align-items: center; justify-content: center;
+            background: none; border: none; cursor: pointer; border-radius: 6px;
+            color: var(--text-tertiary); transition: all 0.1s;
+        }
+        .icon-btn:hover { background: var(--bg-tertiary); color: var(--text-secondary); }
+
+        /* Model selector */
+        .model-select {
+            position: relative; display: flex; align-items: center;
+        }
+        .model-select-btn {
+            padding: 6px 12px; font-size: 13px; font-weight: 500;
+            background: none; border: none; cursor: pointer;
+            color: var(--text-primary); display: flex; align-items: center; gap: 6px;
+            border-radius: 8px; transition: background 0.1s;
+        }
+        .model-select-btn:hover { background: var(--bg-tertiary); }
+        .model-dropdown {
+            position: absolute; top: 100%; left: 50%; transform: translateX(-50%);
+            margin-top: 4px; background: var(--bg-primary);
+            border: 1px solid var(--border-faint); border-radius: 8px;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+            min-width: 300px; max-height: 240px; overflow-y: auto; z-index: 50;
+        }
+        .model-option {
+            width: 100%; padding: 8px 12px; font-size: 13px; text-align: left;
+            background: none; border: none; cursor: pointer;
+            color: var(--text-primary); transition: background 0.1s;
+        }
+        .model-option:hover { background: var(--bg-tertiary); }
+        .model-option.selected { background: var(--bg-tertiary); }
+
+        /* === Messages === */
+        .messages-container {
+            flex: 1; overflow-y: auto; padding: 24px 16px;
+        }
+        .messages-inner { max-width: 768px; margin: 0 auto; padding-bottom: 24px; }
+
+        /* Welcome screen */
+        .welcome {
+            height: 100%; display: flex; align-items: center; justify-content: center;
+            text-align: center; padding: 24px;
+        }
+        .welcome h2 { font-size: 24px; font-weight: 600; margin-bottom: 8px; }
+        .welcome p { color: var(--text-tertiary); font-size: 14px; max-width: 400px; }
+
+        /* Message */
+        .message { margin-bottom: 16px; animation: fadeIn 0.2s ease; }
+        @keyframes fadeIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; } }
+
+        .user-msg { display: flex; justify-content: flex-end; }
+        .user-bubble {
+            background: var(--bg-secondary); border-radius: 20px;
+            padding: 8px 16px; max-width: 600px; font-size: 14px;
+            line-height: 1.6; position: relative;
+        }
+        .user-msg-wrapper { position: relative; }
+        .user-edit-btn {
+            position: absolute; left: -32px; top: 50%; transform: translateY(-50%);
+            opacity: 0; transition: opacity 0.15s;
+        }
+        .user-msg-wrapper:hover .user-edit-btn { opacity: 1; }
+
+        .assistant-msg {
+            background: var(--bg-primary);
+            border: 1px solid var(--border-faint);
+            border-radius: 16px; max-width: 768px;
+        }
+        .msg-header {
+            padding: 8px 12px; border-bottom: 1px solid var(--border-faint);
+            display: flex; justify-content: space-between; align-items: center;
+            font-size: 13px; font-weight: 500; color: var(--text-primary);
+        }
+        .msg-header-left { display: flex; align-items: center; gap: 6px; }
+        .msg-header-left i { color: var(--text-tertiary); }
+        .msg-actions { display: flex; gap: 2px; }
+        .msg-body {
+            padding: 12px; font-size: 14px; line-height: 1.6;
+            color: var(--text-primary);
+        }
+
+        /* Branch navigation */
+        .branch-nav {
+            display: inline-flex; align-items: center; gap: 4px;
+            font-size: 12px; color: var(--text-muted);
+            margin-top: 4px;
+        }
+        .branch-nav button {
+            width: 20px; height: 20px; display: flex; align-items: center; justify-content: center;
+            background: none; border: 1px solid var(--border-faint); border-radius: 4px;
+            cursor: pointer; color: var(--text-tertiary); font-size: 11px;
+            transition: all 0.1s;
+        }
+        .branch-nav button:hover { background: var(--bg-tertiary); color: var(--text-primary); }
+        .branch-nav button:disabled { opacity: 0.3; cursor: default; }
+
+        /* Inline edit */
+        .inline-edit textarea {
+            width: 100%; min-height: 80px; max-height: 300px; resize: vertical;
+            padding: 10px 14px; border: 2px solid var(--border-normal); border-radius: 14px;
+            background: var(--bg-primary); color: var(--text-primary);
+            font-family: inherit; font-size: 14px; line-height: 1.6; outline: none;
+        }
+        .inline-edit textarea:focus { border-color: var(--accent); }
+        .inline-edit-actions { display: flex; gap: 8px; margin-top: 8px; justify-content: flex-end; }
+        .btn-secondary {
+            padding: 6px 14px; font-size: 13px; border-radius: 8px;
+            border: 1px solid var(--border-normal); background: none;
+            color: var(--text-secondary); cursor: pointer;
+        }
+        .btn-secondary:hover { background: var(--bg-tertiary); }
+        .btn-primary {
+            padding: 6px 14px; font-size: 13px; border-radius: 8px;
+            border: none; background: var(--btn-primary); color: var(--btn-primary-text);
+            cursor: pointer;
+        }
+        .btn-primary:hover { background: var(--btn-primary-hover); }
+
+        /* Streaming loading dots */
+        .loading-dots { display: flex; gap: 4px; align-items: center; padding: 8px 0; }
+        .loading-dot {
+            width: 8px; height: 8px; border-radius: 50%;
+            background: var(--text-muted); animation: pulse 1.4s infinite;
+        }
+        .loading-dot:nth-child(2) { animation-delay: 0.2s; }
+        .loading-dot:nth-child(3) { animation-delay: 0.4s; }
+        @keyframes pulse { 0%, 100% { opacity: 0.4; } 50% { opacity: 1; } }
+
+        /* Thinking container */
+        .thinking-container {
+            background: var(--bg-secondary); border: 1px solid var(--border-faint);
+            border-radius: 12px; margin: 8px 0; overflow: hidden;
+        }
+        .thinking-header {
+            display: flex; align-items: center; padding: 8px 12px;
+            cursor: pointer; font-size: 12px; color: var(--text-tertiary);
+            gap: 8px; border-bottom: 1px solid var(--border-faint);
+        }
+        .thinking-header:hover { background: var(--bg-tertiary); }
+        .thinking-content {
+            padding: 12px; font-size: 13px; line-height: 1.6;
+            color: var(--text-secondary); max-height: 400px; overflow-y: auto;
+        }
+        .thinking-content.collapsed { display: none; }
+        .toggle-arrow { transform: rotate(180deg); transition: transform 0.2s; }
+        .toggle-arrow.collapsed { transform: rotate(0deg); }
+
+        /* Markdown content */
+        .markdown-content { line-height: 1.6; }
+        .markdown-content h1, .markdown-content h2, .markdown-content h3 { font-weight: 600; margin-top: 1.2em; margin-bottom: 0.4em; }
+        .markdown-content h1 { font-size: 1.4em; }
+        .markdown-content h2 { font-size: 1.2em; }
+        .markdown-content h3 { font-size: 1.05em; }
+        .markdown-content p { margin-bottom: 0.8em; }
+        .markdown-content ul, .markdown-content ol { margin-bottom: 0.8em; padding-left: 1.5em; }
+        .markdown-content li { margin-bottom: 0.2em; }
+        .markdown-content code {
+            background: var(--code-bg); padding: 0.1em 0.3em;
+            border-radius: 4px; font-size: 0.875em;
+        }
+        .markdown-content pre {
+            background: var(--code-bg); border-radius: 8px;
+            padding: 12px; margin: 12px 0; overflow-x: auto;
+        }
+        .markdown-content pre code { background: none; padding: 0; }
+        .markdown-content blockquote {
+            border-left: 3px solid var(--border-normal);
+            padding-left: 12px; color: var(--text-secondary);
+            margin: 12px 0;
+        }
+        .markdown-content table { border-collapse: collapse; width: 100%; margin: 12px 0; }
+        .markdown-content th, .markdown-content td {
+            border: 1px solid var(--border-faint); padding: 6px 10px;
+            font-size: 13px; text-align: left;
+        }
+        .markdown-content th { background: var(--bg-secondary); font-weight: 600; }
+
+        /* Code block copy button */
+        .code-block-wrapper { position: relative; }
+        .code-copy-btn {
+            position: absolute; top: 8px; right: 8px;
+            background: var(--bg-secondary); border: 1px solid var(--border-faint);
+            border-radius: 6px; padding: 3px 8px; font-size: 11px; cursor: pointer;
+            opacity: 0; transition: opacity 0.15s; color: var(--text-secondary);
+        }
+        .code-block-wrapper:hover .code-copy-btn { opacity: 1; }
+        .code-copy-btn:hover { background: var(--bg-tertiary); }
+
+        /* === Input Area === */
+        .input-area { padding: 16px; border-top: 1px solid var(--border-faint); flex-shrink: 0; }
+        .input-inner { max-width: 768px; margin: 0 auto; }
+        .input-container {
+            border: 1px solid var(--border-normal); border-radius: 24px;
+            background: var(--bg-primary); transition: border-color 0.15s;
+        }
+        .input-container:focus-within { border-color: var(--text-tertiary); }
+
+        /* Document chips */
+        .doc-chips {
+            display: flex; flex-wrap: wrap; gap: 6px; padding: 8px 12px 0;
+        }
+        .doc-chip {
+            display: flex; align-items: center; gap: 4px;
+            padding: 4px 10px; background: var(--bg-tertiary);
+            border: 1px solid var(--border-faint); border-radius: 16px;
+            font-size: 12px; color: var(--text-secondary);
+        }
+        .doc-chip .token-count { color: var(--text-muted); font-size: 11px; }
+        .doc-chip .remove-doc {
+            width: 16px; height: 16px; display: flex; align-items: center; justify-content: center;
+            background: none; border: none; cursor: pointer; color: var(--text-muted);
+            border-radius: 50%; transition: all 0.1s;
+        }
+        .doc-chip .remove-doc:hover { background: var(--danger-bg); color: var(--danger); }
+
+        .input-row { display: flex; align-items: flex-end; }
+        .input-row textarea {
+            flex: 1; padding: 12px 16px; background: transparent; border: none;
+            outline: none; resize: none; font-family: inherit; font-size: 14px;
+            color: var(--text-primary); max-height: 150px; line-height: 1.5;
+        }
+        .input-row textarea::placeholder { color: var(--text-muted); }
+        .upload-btn, .send-btn {
+            width: 36px; height: 36px; margin: 6px;
+            display: flex; align-items: center; justify-content: center;
+            border-radius: 50%; border: none; cursor: pointer;
+            transition: all 0.1s; flex-shrink: 0;
+        }
+        .upload-btn {
+            background: none; color: var(--text-tertiary);
+        }
+        .upload-btn:hover { color: var(--text-secondary); background: var(--bg-tertiary); }
+        .send-btn {
+            background: var(--btn-primary); color: var(--btn-primary-text);
+        }
+        .send-btn:disabled { background: var(--bg-tertiary); color: var(--text-muted); cursor: default; }
+
+        /* === Settings Panel === */
+        .settings-panel {
+            position: fixed; right: 0; top: 0; bottom: 0; width: 360px;
+            background: var(--bg-primary); border-left: 1px solid var(--border-faint);
+            box-shadow: -4px 0 12px rgba(0,0,0,0.08); z-index: 100;
+            display: flex; flex-direction: column;
+            transform: translateX(100%); transition: transform 0.25s ease;
+        }
+        .settings-panel.open { transform: translateX(0); }
+        .settings-header {
+            padding: 16px; border-bottom: 1px solid var(--border-faint);
+            display: flex; justify-content: space-between; align-items: center;
+        }
+        .settings-header h2 { font-size: 16px; font-weight: 600; }
+        .settings-body { flex: 1; overflow-y: auto; padding: 16px; }
+        .setting-group { margin-bottom: 20px; }
+        .setting-label { font-size: 13px; font-weight: 500; margin-bottom: 6px; color: var(--text-secondary); }
+        .setting-input {
+            width: 100%; padding: 8px 12px; font-size: 13px;
+            border: 1px solid var(--border-faint); border-radius: 8px;
+            background: var(--bg-secondary); color: var(--text-primary);
+            outline: none; font-family: inherit;
+        }
+        .setting-input:focus { border-color: var(--accent); }
+        .setting-textarea {
+            width: 100%; padding: 8px 12px; font-size: 13px; min-height: 80px;
+            border: 1px solid var(--border-faint); border-radius: 8px;
+            background: var(--bg-secondary); color: var(--text-primary);
+            outline: none; font-family: inherit; resize: vertical;
+        }
+
+        /* Stats badge */
+        .stats-badge {
+            display: flex; align-items: center; gap: 3px;
+            padding: 3px 8px; border-radius: 12px;
+            background: var(--bg-tertiary); border: 1px solid var(--border-faint);
+            cursor: default;
+        }
+        .msg-stats {
+            display: flex; gap: 12px; padding: 4px 12px;
+            font-size: 11px; color: var(--text-muted);
+            border-top: 1px solid var(--border-faint);
+        }
+        .msg-stats span { display: flex; align-items: center; gap: 3px; }
+
+        /* Drag-and-drop */
+        .input-container.drag-over {
+            border-color: var(--accent) !important;
+            border-style: dashed !important;
+            background: var(--bg-tertiary);
+        }
+
+        /* Responsive */
+        @media (max-width: 768px) {
+            .sidebar { position: fixed; z-index: 50; height: 100%; }
+            .sidebar.hidden { transform: translateX(-100%); }
+        }
+    </style>
+</head>
+<body>
+<script>
+    // Apply theme before render
+    (function() {
+        // Will be overridden once settings load, but use localStorage for instant apply
+        const t = localStorage.getItem('canopy-theme') || 'light';
+        document.documentElement.setAttribute('data-theme', t);
+    })();
+</script>
+
+<div class="app" x-data="canopyApp()" x-init="init()">
+    <!-- Sidebar -->
+    <div class="sidebar custom-scrollbar" :class="{ hidden: !sidebarOpen }">
+        <div class="sidebar-header">
+            <h1>
+                <i data-lucide="trees" style="width:20px;height:20px;color:var(--accent);"></i>
+                Canopy
+                <span class="badge">cache-aware</span>
+            </h1>
+        </div>
+        <button class="new-chat-btn" @click="newChat()">
+            <i data-lucide="plus" style="width:16px;height:16px;"></i>
+            New Chat
+        </button>
+        <div class="conv-list custom-scrollbar">
+            <template x-for="conv in conversations" :key="conv.id">
+                <div class="conv-item" :class="{ active: currentConversationId === conv.id }"
+                     @click="loadConversation(conv.id)"
+                     @dblclick.stop="renameConversation(conv)">
+                    <i data-lucide="message-square" style="width:14px;height:14px;color:var(--text-muted);flex-shrink:0;"></i>
+                    <span class="conv-title" x-text="conv.title || 'New Chat'"></span>
+                    <button class="delete-btn" @click.stop="deleteConversation(conv.id)"
+                            title="Delete">
+                        <i data-lucide="trash-2" style="width:12px;height:12px;"></i>
+                    </button>
+                </div>
+            </template>
+        </div>
+        <div class="sidebar-footer">
+            <button @click="toggleTheme()">
+                <i data-lucide="sun" style="width:14px;height:14px;" x-show="theme === 'light'"></i>
+                <i data-lucide="moon" style="width:14px;height:14px;" x-show="theme === 'dark'" x-cloak></i>
+                <span x-text="theme === 'light' ? 'Dark Mode' : 'Light Mode'"></span>
+            </button>
+            <button @click="settingsOpen = true">
+                <i data-lucide="settings" style="width:14px;height:14px;"></i>
+                Settings
+            </button>
+        </div>
+    </div>
+
+    <!-- Main content -->
+    <div class="main">
+        <!-- Header -->
+        <div class="header">
+            <div class="header-left">
+                <button class="icon-btn" @click="sidebarOpen = !sidebarOpen">
+                    <i data-lucide="panel-left" style="width:18px;height:18px;"></i>
+                </button>
+            </div>
+
+            <!-- Model selector -->
+            <div class="model-select" x-data="{ open: false }">
+                <button class="model-select-btn" @click="open = !open">
+                    <i data-lucide="cpu" style="width:16px;height:16px;color:var(--text-tertiary);"></i>
+                    <span x-text="currentModel || 'Select Model'"></span>
+                    <i data-lucide="chevron-down" style="width:14px;height:14px;color:var(--text-muted);"></i>
+                </button>
+                <div class="model-dropdown custom-scrollbar" x-show="open" @click.away="open = false" x-cloak>
+                    <template x-for="m in availableModels" :key="m.id">
+                        <button class="model-option" :class="{ selected: currentModel === m.id }"
+                                @click="selectModel(m.id); open = false" x-text="m.id"></button>
+                    </template>
+                    <div x-show="availableModels.length === 0"
+                         style="padding:12px;font-size:13px;color:var(--text-tertiary);text-align:center;">
+                        No models available. Check oMLX connection.
+                    </div>
+                </div>
+            </div>
+
+            <div style="display:flex;align-items:center;gap:4px;">
+                <!-- Cache stats badge -->
+                <div x-show="omlxStats.cache_efficiency !== null" x-cloak
+                     class="stats-badge" :title="'Cache: ' + (omlxStats.cache_efficiency || 0).toFixed(1) + '% | ' + (omlxStats.avg_generation_tps || 0).toFixed(1) + ' tok/s'">
+                    <span style="color:var(--accent);font-size:11px;font-weight:600;"
+                          x-text="(omlxStats.cache_efficiency || 0).toFixed(0) + '%'"></span>
+                    <span style="color:var(--text-muted);font-size:10px;">cache</span>
+                </div>
+                <button class="icon-btn" x-show="currentConversationId && activePath.length > 0"
+                        @click="exportChat('markdown')" title="Export as Markdown" x-cloak>
+                    <i data-lucide="download" style="width:18px;height:18px;"></i>
+                </button>
+                <button class="icon-btn" @click="settingsOpen = true">
+                    <i data-lucide="settings" style="width:18px;height:18px;"></i>
+                </button>
+            </div>
+        </div>
+
+        <!-- Messages Area -->
+        <div class="messages-container custom-scrollbar" id="messagesContainer">
+            <!-- Welcome screen -->
+            <div x-show="activePath.length === 0 && !isStreaming" class="welcome" x-cloak>
+                <div>
+                    <h2>Canopy</h2>
+                    <p>Cache-aware branching chat for oMLX. Start a conversation, branch with edits, and read documents.</p>
+                </div>
+            </div>
+
+            <!-- Active path messages -->
+            <div class="messages-inner">
+                <template x-for="(msg, idx) in activePath" :key="msg.id">
+                    <div class="message">
+                        <!-- User message -->
+                        <template x-if="msg.role === 'user'">
+                            <div>
+                                <div class="user-msg">
+                                    <div class="user-msg-wrapper">
+                                        <div class="user-edit-btn" style="display:flex;flex-direction:column;gap:2px;">
+                                            <button class="icon-btn" @click="startEdit(msg)"
+                                                    title="Edit (creates branch)">
+                                                <i data-lucide="pencil" style="width:14px;height:14px;"></i>
+                                            </button>
+                                            <button class="icon-btn" @click="deleteMessage(msg)"
+                                                    title="Delete" style="color:var(--danger);">
+                                                <i data-lucide="trash-2" style="width:14px;height:14px;"></i>
+                                            </button>
+                                        </div>
+                                        <template x-if="editingMessageId !== msg.id">
+                                            <div class="user-bubble" x-html="renderMarkdown(msg.content)"></div>
+                                        </template>
+                                        <template x-if="editingMessageId === msg.id">
+                                            <div class="inline-edit">
+                                                <textarea x-model="editContent"
+                                                    @keydown.enter.ctrl="saveEdit(msg)"
+                                                    @keydown.escape="cancelEdit()"
+                                                    x-init="$nextTick(() => { $el.focus(); $el.setSelectionRange($el.value.length, $el.value.length); })"
+                                                ></textarea>
+                                                <div class="inline-edit-actions">
+                                                    <button class="btn-secondary" @click="cancelEdit()">Cancel</button>
+                                                    <button class="btn-primary" @click="saveEdit(msg)">Save & Send</button>
+                                                </div>
+                                            </div>
+                                        </template>
+                                    </div>
+                                </div>
+                                <!-- Branch nav for user messages -->
+                                <div x-show="getSiblingCount(msg) > 1" class="branch-nav" style="justify-content:flex-end;padding-right:4px;">
+                                    <button @click="prevSibling(msg)" :disabled="getSiblingIndex(msg) === 0">&lt;</button>
+                                    <span x-text="(getSiblingIndex(msg) + 1) + '/' + getSiblingCount(msg)"></span>
+                                    <button @click="nextSibling(msg)" :disabled="getSiblingIndex(msg) >= getSiblingCount(msg) - 1">&gt;</button>
+                                </div>
+                            </div>
+                        </template>
+
+                        <!-- Assistant message -->
+                        <template x-if="msg.role === 'assistant'">
+                            <div>
+                                <div class="assistant-msg">
+                                    <div class="msg-header">
+                                        <div class="msg-header-left">
+                                            <i data-lucide="cpu" style="width:14px;height:14px;"></i>
+                                            <span x-text="msg.model || currentModel || 'Assistant'"></span>
+                                        </div>
+                                        <div class="msg-actions">
+                                            <button class="icon-btn" @click="copyMessage(msg.content)" title="Copy">
+                                                <i data-lucide="copy" style="width:14px;height:14px;"></i>
+                                            </button>
+                                            <button class="icon-btn" @click="saveMessageToFile(msg)" title="Save to file">
+                                                <i data-lucide="download" style="width:14px;height:14px;"></i>
+                                            </button>
+                                            <button class="icon-btn" @click="regenerate(msg)" title="Regenerate">
+                                                <i data-lucide="refresh-cw" style="width:14px;height:14px;"></i>
+                                            </button>
+                                            <button class="icon-btn" @click="deleteMessage(msg)" title="Delete"
+                                                    style="color:var(--danger);">
+                                                <i data-lucide="trash-2" style="width:14px;height:14px;"></i>
+                                            </button>
+                                        </div>
+                                    </div>
+                                    <div class="msg-body markdown-content" x-html="renderMarkdown(msg.content)"></div>
+                                    <div class="msg-stats">
+                                        <span x-show="msg.usage?.prompt_tokens" title="Prompt tokens (context sent)">
+                                            <i data-lucide="arrow-up" style="width:10px;height:10px;"></i>
+                                            <span x-text="msg.usage?.prompt_tokens || ''"></span> prompt
+                                            <span x-show="msg.usage?.prompt_tokens_per_second" style="color:var(--text-muted);"
+                                                  x-text="'(' + (msg.usage?.prompt_tokens_per_second?.toFixed(0) || '') + ' t/s)'"></span>
+                                        </span>
+                                        <span x-show="msg.usage?.completion_tokens" title="Completion tokens (generated)">
+                                            <i data-lucide="arrow-down" style="width:10px;height:10px;"></i>
+                                            <span x-text="msg.usage?.completion_tokens || ''"></span> gen
+                                            <span x-show="msg.usage?.generation_tokens_per_second" style="color:var(--text-muted);"
+                                                  x-text="'(' + (msg.usage?.generation_tokens_per_second?.toFixed(0) || '') + ' t/s)'"></span>
+                                        </span>
+                                        <span x-show="msg.usage?.total_time" title="Total time">
+                                            <i data-lucide="clock" style="width:10px;height:10px;"></i>
+                                            <span x-text="(msg.usage?.total_time?.toFixed(1) || '') + 's'"></span>
+                                        </span>
+                                        <span style="flex:1;"></span>
+                                        <button @click="branchFromMessage(msg)"
+                                                :disabled="isStreaming"
+                                                style="background:none;border:none;cursor:pointer;color:var(--text-muted);display:flex;align-items:center;gap:3px;font-size:11px;padding:2px 6px;border-radius:4px;transition:all 0.1s;"
+                                                onmouseover="this.style.color='var(--accent)';this.style.background='var(--bg-tertiary)'"
+                                                onmouseout="this.style.color='var(--text-muted)';this.style.background='none'"
+                                                title="Branch conversation from here">
+                                            <i data-lucide="git-branch" style="width:11px;height:11px;"></i>
+                                            Branch
+                                        </button>
+                                    </div>
+                                </div>
+                                <!-- Branch nav for assistant messages -->
+                                <div x-show="getSiblingCount(msg) > 1" class="branch-nav">
+                                    <button @click="prevSibling(msg)" :disabled="getSiblingIndex(msg) === 0">&lt;</button>
+                                    <span x-text="(getSiblingIndex(msg) + 1) + '/' + getSiblingCount(msg)"></span>
+                                    <button @click="nextSibling(msg)" :disabled="getSiblingIndex(msg) >= getSiblingCount(msg) - 1">&gt;</button>
+                                </div>
+                            </div>
+                        </template>
+                    </div>
+                </template>
+
+                <!-- Streaming message -->
+                <div x-show="isStreaming" class="message">
+                    <div class="assistant-msg">
+                        <div class="msg-header">
+                            <div class="msg-header-left">
+                                <i data-lucide="cpu" style="width:14px;height:14px;"></i>
+                                <span x-text="currentModel || 'Assistant'"></span>
+                            </div>
+                            <button class="icon-btn" @click="stopStreaming()" title="Stop">
+                                <i data-lucide="square" style="width:14px;height:14px;"></i>
+                            </button>
+                        </div>
+                        <div class="msg-body">
+                            <div x-show="!streamingContent" class="loading-dots">
+                                <div class="loading-dot"></div>
+                                <div class="loading-dot"></div>
+                                <div class="loading-dot"></div>
+                            </div>
+                            <div x-show="streamingContent" class="markdown-content"
+                                 x-ref="streamingOutput" x-effect="updateStreamingDOM()"></div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Input Area -->
+        <div class="input-area">
+            <div class="input-inner">
+                <div class="input-container" :class="{ 'drag-over': isDragOver }"
+                     @dragover.prevent="isDragOver = true"
+                     @dragleave.prevent="isDragOver = false"
+                     @drop.prevent="isDragOver = false; handleFileDrop($event)">
+
+                    <!-- Document chips -->
+                    <div x-show="pendingDocuments.length > 0" class="doc-chips" x-cloak>
+                        <template x-for="(doc, idx) in pendingDocuments" :key="doc.filename">
+                            <div class="doc-chip">
+                                <i data-lucide="file-text" style="width:12px;height:12px;"></i>
+                                <span x-text="doc.filename"></span>
+                                <span class="token-count" x-text="'~' + doc.token_estimate + ' tok'"></span>
+                                <button class="remove-doc" @click="pendingDocuments.splice(idx, 1)">
+                                    <i data-lucide="x" style="width:10px;height:10px;"></i>
+                                </button>
+                            </div>
+                        </template>
+                    </div>
+
+                    <input type="file" id="fileInput"
+                           accept=".md,.txt,.pdf,.docx,.doc"
+                           x-ref="fileInput" @change="handleFileSelect($event)" class="hidden" style="display:none;">
+
+                    <div class="input-row">
+                        <button class="upload-btn" @click="$refs.fileInput.click()"
+                                :disabled="isStreaming" title="Upload document">
+                            <i data-lucide="paperclip" style="width:18px;height:18px;"></i>
+                        </button>
+                        <textarea
+                            x-model="inputText"
+                            @keydown.enter="if (!$event.shiftKey) { $event.preventDefault(); sendMessage(); }"
+                            @input="autoResize($event.target)"
+                            placeholder="Type a message..."
+                            :disabled="isStreaming"
+                            rows="1"
+                        ></textarea>
+                        <button class="send-btn"
+                                @click="sendMessage()"
+                                :disabled="(!inputText.trim() && pendingDocuments.length === 0) || isStreaming || !currentModel">
+                            <i data-lucide="arrow-up" style="width:18px;height:18px;"></i>
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Settings Panel -->
+    <div class="settings-panel" :class="{ open: settingsOpen }">
+        <div class="settings-header">
+            <h2>Settings</h2>
+            <button class="icon-btn" @click="saveSettings()">
+                <i data-lucide="x" style="width:18px;height:18px;"></i>
+            </button>
+        </div>
+        <div class="settings-body">
+            <div class="setting-group">
+                <div class="setting-label">oMLX Server URL</div>
+                <input class="setting-input" type="text" x-model="settings.omlx_url"
+                       placeholder="http://localhost:8000">
+            </div>
+            <div class="setting-group">
+                <div class="setting-label">oMLX API Key</div>
+                <input class="setting-input" type="password" x-model="settings.omlx_api_key"
+                       placeholder="Enter API key">
+            </div>
+            <div class="setting-group">
+                <div class="setting-label">System Prompt</div>
+                <textarea class="setting-textarea" x-model="settings.system_prompt"
+                          placeholder="Optional system prompt shared across all conversations"></textarea>
+                <div style="font-size:11px;color:var(--text-muted);margin-top:4px;">
+                    Keeping this stable maximizes prefix cache reuse across conversations.
+                </div>
+            </div>
+            <div class="setting-group">
+                <button class="btn-primary" @click="saveSettings()" style="width:100%;">Save Settings</button>
+            </div>
+        </div>
+    </div>
+    <!-- Settings overlay -->
+    <div x-show="settingsOpen" @click="saveSettings()"
+         style="position:fixed;inset:0;background:rgba(0,0,0,0.3);z-index:99;" x-cloak></div>
+</div>
+
+<script>
+    // Configure marked.js
+    marked.use({ breaks: true, gfm: true });
+    if (typeof markedHighlight !== 'undefined') {
+        marked.use(markedHighlight.markedHighlight({
+            langPrefix: 'hljs language-',
+            highlight(code, lang) {
+                const language = hljs.getLanguage(lang) ? lang : 'plaintext';
+                return hljs.highlight(code, { language }).value;
+            }
+        }));
+    }
+
+    function canopyApp() {
+        return {
+            // UI state
+            sidebarOpen: window.innerWidth >= 768,
+            settingsOpen: false,
+            theme: localStorage.getItem('canopy-theme') || 'light',
+            isDragOver: false,
+
+            // Settings (loaded from server)
+            settings: {
+                omlx_url: 'http://localhost:8000',
+                omlx_api_key: '',
+                system_prompt: '',
+                theme: 'light',
+            },
+
+            // Conversations
+            conversations: [],
+            currentConversationId: null,
+
+            // Message tree
+            messageTree: {},        // id → message
+            childrenMap: {},        // parent_id → [child_ids] (ordered by created_at)
+            activePath: [],         // current path from root to leaf
+
+            // Models
+            availableModels: [],
+            currentModel: null,
+
+            // oMLX stats
+            omlxStats: { cache_efficiency: null, avg_generation_tps: 0 },
+
+            // Input
+            inputText: '',
+            pendingDocuments: [],   // [{filename, content, token_estimate}]
+
+            // Streaming
+            isStreaming: false,
+            streamingContent: '',
+            abortController: null,
+            thinkingState: { isInThinking: false, startTime: null },
+
+            // Edit
+            editingMessageId: null,
+            editContent: '',
+
+            // Scroll
+            autoScrollEnabled: true,
+
+            async init() {
+                await this.loadSettings();
+                await this.loadModels();
+                await this.loadConversations();
+                this.applyTheme();
+                this.setupScrollListener();
+                this.pollOmlxStats();
+                setInterval(() => this.pollOmlxStats(), 15000); // refresh every 15s
+
+                this.$watch('activePath', () => {
+                    this.$nextTick(() => lucide.createIcons());
+                });
+                this.$watch('conversations', () => {
+                    this.$nextTick(() => lucide.createIcons());
+                });
+            },
+
+            // === Settings ===
+
+            async loadSettings() {
+                try {
+                    const resp = await fetch('/api/settings');
+                    if (resp.ok) {
+                        this.settings = await resp.json();
+                        this.theme = this.settings.theme || 'light';
+                        localStorage.setItem('canopy-theme', this.theme);
+                    }
+                } catch (e) { console.error('Failed to load settings:', e); }
+            },
+
+            async saveSettings() {
+                this.settings.theme = this.theme;
+                try {
+                    await fetch('/api/settings', {
+                        method: 'PUT',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(this.settings),
+                    });
+                } catch (e) { console.error('Failed to save settings:', e); }
+                this.settingsOpen = false;
+                await this.loadModels();
+            },
+
+            // === Theme ===
+
+            toggleTheme() {
+                this.theme = this.theme === 'light' ? 'dark' : 'light';
+                localStorage.setItem('canopy-theme', this.theme);
+                this.applyTheme();
+                this.$nextTick(() => lucide.createIcons());
+            },
+
+            applyTheme() {
+                document.documentElement.setAttribute('data-theme', this.theme);
+                const light = document.getElementById('hljs-light-theme');
+                const dark = document.getElementById('hljs-dark-theme');
+                if (light && dark) {
+                    light.disabled = this.theme === 'dark';
+                    dark.disabled = this.theme === 'light';
+                }
+            },
+
+            // === Models ===
+
+            async loadModels() {
+                try {
+                    const resp = await fetch('/api/models');
+                    if (resp.ok) {
+                        const data = await resp.json();
+                        this.availableModels = data.data || [];
+                        if (!this.currentModel && this.availableModels.length > 0) {
+                            this.currentModel = this.availableModels[0].id;
+                        }
+                    }
+                } catch (e) { /* oMLX not reachable — that's ok */ }
+            },
+
+            selectModel(id) { this.currentModel = id; },
+
+            async pollOmlxStats() {
+                try {
+                    const resp = await fetch('/api/omlx-stats');
+                    if (resp.ok) {
+                        const data = await resp.json();
+                        if (!data.error) this.omlxStats = data;
+                    }
+                } catch (e) { /* oMLX not reachable */ }
+            },
+
+            // === Conversations ===
+
+            async loadConversations() {
+                try {
+                    const resp = await fetch('/api/conversations');
+                    if (resp.ok) this.conversations = await resp.json();
+                } catch (e) { console.error('Failed to load conversations:', e); }
+            },
+
+            async newChat() {
+                try {
+                    const resp = await fetch('/api/conversations', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ title: 'New Chat', model: this.currentModel || '' }),
+                    });
+                    if (resp.ok) {
+                        const conv = await resp.json();
+                        this.conversations.unshift(conv);
+                        this.currentConversationId = conv.id;
+                        this.messageTree = {};
+                        this.childrenMap = {};
+                        this.activePath = [];
+                        this.pendingDocuments = [];
+                    }
+                } catch (e) { console.error('Failed to create conversation:', e); }
+                this.sidebarOpen = window.innerWidth >= 768;
+            },
+
+            async loadConversation(id) {
+                try {
+                    const resp = await fetch(`/api/conversations/${id}`);
+                    if (!resp.ok) return;
+                    const conv = await resp.json();
+                    this.currentConversationId = id;
+                    if (conv.model && this.availableModels.some(m => m.id === conv.model)) {
+                        this.currentModel = conv.model;
+                    }
+                    this.buildTree(conv.messages || []);
+                    this.computeActivePath();
+                } catch (e) { console.error('Failed to load conversation:', e); }
+                this.sidebarOpen = window.innerWidth >= 768;
+            },
+
+            async deleteConversation(id) {
+                if (!confirm('Delete this conversation?')) return;
+                try {
+                    await fetch(`/api/conversations/${id}`, { method: 'DELETE' });
+                    this.conversations = this.conversations.filter(c => c.id !== id);
+                    if (this.currentConversationId === id) {
+                        this.currentConversationId = null;
+                        this.messageTree = {};
+                        this.childrenMap = {};
+                        this.activePath = [];
+                    }
+                } catch (e) { console.error('Failed to delete conversation:', e); }
+            },
+
+            async updateConversationTitle(title) {
+                if (!this.currentConversationId) return;
+                try {
+                    await fetch(`/api/conversations/${this.currentConversationId}`, {
+                        method: 'PATCH',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ title }),
+                    });
+                    const conv = this.conversations.find(c => c.id === this.currentConversationId);
+                    if (conv) conv.title = title;
+                } catch (e) { /* ignore */ }
+            },
+
+            // === Tree Operations ===
+
+            buildTree(messages) {
+                this.messageTree = {};
+                this.childrenMap = {};
+                for (const msg of messages) {
+                    this.messageTree[msg.id] = msg;
+                    const parentKey = msg.parent_id || '__root__';
+                    if (!this.childrenMap[parentKey]) this.childrenMap[parentKey] = [];
+                    this.childrenMap[parentKey].push(msg.id);
+                }
+            },
+
+            addToTree(msg) {
+                this.messageTree[msg.id] = msg;
+                const parentKey = msg.parent_id || '__root__';
+                if (!this.childrenMap[parentKey]) this.childrenMap[parentKey] = [];
+                this.childrenMap[parentKey].push(msg.id);
+            },
+
+            computeActivePath(startFromId = null) {
+                const path = [];
+                let currentId;
+
+                if (startFromId) {
+                    // Walk up to root, then down
+                    const upPath = [];
+                    let cid = startFromId;
+                    while (cid) {
+                        const msg = this.messageTree[cid];
+                        if (!msg) break;
+                        upPath.push(msg);
+                        cid = msg.parent_id;
+                    }
+                    upPath.reverse();
+                    path.push(...upPath);
+                    // Continue down from startFromId
+                    currentId = startFromId;
+                } else {
+                    // Start from most recent root
+                    const roots = this.childrenMap['__root__'] || [];
+                    if (roots.length === 0) { this.activePath = []; return; }
+                    currentId = roots[roots.length - 1];
+                    path.push(this.messageTree[currentId]);
+                }
+
+                // Follow most recent child at each level
+                while (true) {
+                    const children = this.childrenMap[currentId] || [];
+                    if (children.length === 0) break;
+                    currentId = children[children.length - 1];
+                    path.push(this.messageTree[currentId]);
+                }
+
+                this.activePath = path;
+                this.$nextTick(() => {
+                    this.addCodeCopyButtons();
+                    this.renderMath();
+                    lucide.createIcons();
+                });
+            },
+
+            getSiblings(msg) {
+                const parentKey = msg.parent_id || '__root__';
+                const siblingIds = this.childrenMap[parentKey] || [];
+                return siblingIds.filter(id => {
+                    const m = this.messageTree[id];
+                    return m && m.role === msg.role;
+                });
+            },
+
+            getSiblingCount(msg) { return this.getSiblings(msg).length; },
+
+            getSiblingIndex(msg) {
+                return this.getSiblings(msg).indexOf(msg.id);
+            },
+
+            prevSibling(msg) {
+                const siblings = this.getSiblings(msg);
+                const idx = siblings.indexOf(msg.id);
+                if (idx > 0) this.computeActivePath(siblings[idx - 1]);
+            },
+
+            nextSibling(msg) {
+                const siblings = this.getSiblings(msg);
+                const idx = siblings.indexOf(msg.id);
+                if (idx < siblings.length - 1) this.computeActivePath(siblings[idx + 1]);
+            },
+
+            // === Send Message ===
+
+            async sendMessage() {
+                const text = this.inputText.trim();
+                const docs = [...this.pendingDocuments];
+                if (!text && docs.length === 0) return;
+                if (!this.currentModel || this.isStreaming) return;
+
+                // Create conversation if needed
+                if (!this.currentConversationId) {
+                    await this.newChat();
+                }
+
+                this.inputText = '';
+                this.pendingDocuments = [];
+
+                // Build content: docs first, then user text
+                let content = '';
+                for (const doc of docs) {
+                    content += `Here is the document '${doc.filename}':\n\n${doc.content}\n\n`;
+                }
+                content += text;
+
+                // Determine parent_id: last message in active path, or null for first message
+                const parentId = this.activePath.length > 0
+                    ? this.activePath[this.activePath.length - 1].id
+                    : null;
+
+                // Save user message to DB
+                try {
+                    const resp = await fetch(`/api/conversations/${this.currentConversationId}/messages`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            role: 'user',
+                            content: content,
+                            parent_id: parentId,
+                            model: this.currentModel,
+                        }),
+                    });
+                    if (!resp.ok) { console.error('Failed to save message'); return; }
+                    const userMsg = await resp.json();
+                    this.addToTree(userMsg);
+                    this.computeActivePath(userMsg.id);
+
+                    // Auto-title on first message
+                    const conv = this.conversations.find(c => c.id === this.currentConversationId);
+                    if (conv && conv.title === 'New Chat') {
+                        const title = text.slice(0, 50) || docs[0]?.filename || 'New Chat';
+                        this.updateConversationTitle(title);
+                    }
+
+                    // Stream response
+                    this.forceScrollToBottom();
+                    await this.streamResponse(userMsg.id);
+                } catch (e) {
+                    console.error('Send failed:', e);
+                }
+            },
+
+            // === Streaming ===
+
+            async streamResponse(parentMsgId) {
+                this.isStreaming = true;
+                this.streamingContent = '';
+                this.abortController = new AbortController();
+                this.autoScrollEnabled = true;
+                this.thinkingState = { isInThinking: false, startTime: null };
+
+                try {
+                    const response = await fetch('/api/chat', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            conversation_id: this.currentConversationId,
+                            parent_id: parentMsgId,
+                            model: this.currentModel,
+                        }),
+                        signal: this.abortController.signal,
+                    });
+
+                    if (!response.ok) {
+                        const errText = await response.text();
+                        throw new Error(errText || `Error: ${response.status}`);
+                    }
+
+                    const reader = response.body.getReader();
+                    const decoder = new TextDecoder();
+                    let buffer = '';
+
+                    while (true) {
+                        const { done, value } = await reader.read();
+                        if (done) break;
+
+                        buffer += decoder.decode(value, { stream: true });
+                        const lines = buffer.split('\n');
+                        buffer = lines.pop() || '';
+
+                        for (const line of lines) {
+                            if (!line.trim() || line.trim() === 'data: [DONE]') continue;
+                            if (!line.startsWith('data: ')) continue;
+
+                            try {
+                                const data = JSON.parse(line.slice(6));
+
+                                // Final event from Canopy server
+                                if (data.type === 'done' && data.message_id) {
+                                    // Add message directly to tree — no reload, no re-render flash
+                                    this._finishedMessageId = data.message_id;
+                                    this._finishedUsage = data.usage || null;
+                                    continue;
+                                }
+
+                                if (data.error) {
+                                    this.streamingContent += `\n\n**Error:** ${data.error}`;
+                                    continue;
+                                }
+
+                                const delta = data.choices?.[0]?.delta;
+                                if (delta?.reasoning_content) {
+                                    if (!this.thinkingState.isInThinking) {
+                                        this.streamingContent += '<think>';
+                                        this.thinkingState.isInThinking = true;
+                                        this.thinkingState.startTime = Date.now();
+                                    }
+                                    this.streamingContent += delta.reasoning_content;
+                                }
+                                if (delta?.content) {
+                                    if (this.thinkingState.isInThinking) {
+                                        const elapsed = Date.now() - this.thinkingState.startTime;
+                                        this.streamingContent += `</think data-elapsed="${elapsed}">`;
+                                        this.thinkingState.isInThinking = false;
+                                    }
+                                    this.streamingContent += delta.content;
+                                }
+                            } catch (e) { /* skip unparseable lines */ }
+                        }
+                    }
+
+                    // Close unclosed thinking
+                    if (this.thinkingState.isInThinking) {
+                        const elapsed = Date.now() - this.thinkingState.startTime;
+                        this.streamingContent += `</think data-elapsed="${elapsed}">`;
+                        this.thinkingState.isInThinking = false;
+                    }
+
+                } catch (error) {
+                    if (error.name === 'AbortError') {
+                        if (this.thinkingState.isInThinking) {
+                            this.streamingContent += '</think>';
+                            this.thinkingState.isInThinking = false;
+                        }
+                    } else {
+                        console.error('Streaming error:', error);
+                    }
+                } finally {
+                    if (this._renderTimer) { clearTimeout(this._renderTimer); this._renderTimer = null; }
+
+                    // Splice finished message into tree before hiding streaming div
+                    const finalContent = this.streamingContent;
+                    const msgId = this._finishedMessageId;
+                    const usageData = this._finishedUsage;
+                    this._finishedMessageId = null;
+                    this._finishedUsage = null;
+
+                    if (msgId && finalContent) {
+                        const msg = {
+                            id: msgId,
+                            conversation_id: this.currentConversationId,
+                            parent_id: parentMsgId,
+                            role: 'assistant',
+                            content: finalContent,
+                            model: this.currentModel,
+                            created_at: Date.now() / 1000,
+                            usage: usageData,
+                        };
+                        this.addToTree(msg);
+                        // Append to activePath and hide streaming div — don't touch streamingContent yet
+                        this.activePath.push(msg);
+                        this.isStreaming = false;
+                        // Clear streamingContent after the DOM has settled (div is already hidden)
+                        this.$nextTick(() => { this.streamingContent = ''; });
+                    } else {
+                        this.isStreaming = false;
+                        this.$nextTick(() => { this.streamingContent = ''; });
+                    }
+
+                    this.abortController = null;
+                    this._lastStructure = '';
+                    this._lastRenderedLen = 0;
+                    this.$nextTick(() => lucide.createIcons());
+                    this.pollOmlxStats(); // refresh stats after each response
+                }
+            },
+
+            async reloadCurrentConversation(focusMessageId) {
+                try {
+                    const resp = await fetch(`/api/conversations/${this.currentConversationId}`);
+                    if (!resp.ok) return;
+                    const conv = await resp.json();
+                    this.buildTree(conv.messages || []);
+                    this.computeActivePath(focusMessageId);
+                } catch (e) { /* ignore */ }
+            },
+
+            stopStreaming() {
+                if (this.abortController) this.abortController.abort();
+            },
+
+            // === Edit & Regenerate ===
+
+            startEdit(msg) {
+                if (this.isStreaming) return;
+                this.editingMessageId = msg.id;
+                this.editContent = msg.content;
+            },
+
+            cancelEdit() {
+                this.editingMessageId = null;
+                this.editContent = '';
+            },
+
+            async saveEdit(msg) {
+                if (!this.editContent.trim() || this.isStreaming) return;
+
+                // Create a new sibling user message (branch)
+                const parentId = msg.parent_id; // same parent as original
+                try {
+                    const resp = await fetch(`/api/conversations/${this.currentConversationId}/messages`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            role: 'user',
+                            content: this.editContent.trim(),
+                            parent_id: parentId,
+                            model: this.currentModel,
+                        }),
+                    });
+                    if (!resp.ok) return;
+                    const newMsg = await resp.json();
+                    this.addToTree(newMsg);
+                    this.computeActivePath(newMsg.id);
+
+                    this.editingMessageId = null;
+                    this.editContent = '';
+
+                    // Stream new response
+                    this.forceScrollToBottom();
+                    await this.streamResponse(newMsg.id);
+                } catch (e) { console.error('Edit failed:', e); }
+            },
+
+            async regenerate(msg) {
+                if (this.isStreaming) return;
+                // Stream a new assistant response as sibling — use same parent
+                const parentId = msg.parent_id;
+                if (!parentId) return;
+                this.forceScrollToBottom();
+                await this.streamResponse(parentId);
+            },
+
+            async deleteMessage(msg) {
+                if (this.isStreaming) return;
+                if (!confirm('Delete this message and all replies below it?')) return;
+                try {
+                    const resp = await fetch(`/api/messages/${msg.id}`, { method: 'DELETE' });
+                    if (!resp.ok) return;
+
+                    // Remove from tree
+                    delete this.messageTree[msg.id];
+                    const parentKey = msg.parent_id || '__root__';
+                    if (this.childrenMap[parentKey]) {
+                        this.childrenMap[parentKey] = this.childrenMap[parentKey].filter(id => id !== msg.id);
+                    }
+
+                    // Recompute active path — go to parent's latest branch
+                    if (msg.parent_id) {
+                        this.computeActivePath(msg.parent_id);
+                    } else {
+                        // Deleted a root message — reload conversation
+                        await this.reloadCurrentConversation();
+                    }
+                } catch (e) { console.error('Delete failed:', e); }
+            },
+
+            branchFromMessage(msg) {
+                if (this.isStreaming) return;
+                const msgId = msg.id;
+                const idx = this.activePath.findIndex(m => m.id === msgId);
+                if (idx < 0) return;
+
+                // Truncate in place so Alpine detects the mutation
+                this.activePath.splice(idx + 1);
+
+                // Keep the model from this branch
+                if (msg.model && this.availableModels.some(m => m.id === msg.model)) {
+                    this.currentModel = msg.model;
+                }
+
+                // Visual feedback — strip think tags for clean preview
+                const clean = (msg.content || '').replace(/<think>[\s\S]*?<\/think[^>]*>/g, '').trim();
+                const preview = clean.substring(0, 40).replace(/\n/g, ' ');
+
+                this.$nextTick(() => {
+                    const textarea = document.querySelector('.input-row textarea');
+                    if (textarea) {
+                        textarea.placeholder = `Branch from: "${preview}..."`;
+                        textarea.focus();
+                    }
+                    this.forceScrollToBottom();
+                    lucide.createIcons();
+                });
+            },
+
+            // === Documents ===
+
+            async handleFileDrop(event) {
+                const files = event.dataTransfer?.files;
+                if (files) {
+                    for (const f of files) await this.parseAndAddDocument(f);
+                }
+            },
+
+            async handleFileSelect(event) {
+                const files = event.target.files;
+                if (!files) return;
+                for (const f of files) await this.parseAndAddDocument(f);
+                event.target.value = '';
+            },
+
+            async parseAndAddDocument(file) {
+                const formData = new FormData();
+                formData.append('file', file);
+
+                let url = '/api/documents/parse';
+                if (this.currentConversationId) {
+                    url += `?conversation_id=${this.currentConversationId}`;
+                }
+
+                try {
+                    const resp = await fetch(url, { method: 'POST', body: formData });
+                    if (resp.ok) {
+                        const doc = await resp.json();
+                        this.pendingDocuments.push(doc);
+                        this.$nextTick(() => lucide.createIcons());
+                    }
+                } catch (e) { console.error('Document parse failed:', e); }
+            },
+
+            // === Export ===
+
+            async exportChat(format) {
+                if (!this.currentConversationId) return;
+                const url = `/api/conversations/${this.currentConversationId}/export?format=${format}`;
+                try {
+                    const resp = await fetch(url);
+                    if (!resp.ok) return;
+
+                    if (format === 'json') {
+                        const data = await resp.json();
+                        const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+                        this._downloadBlob(blob, `${data.title || 'chat'}.json`);
+                    } else {
+                        const text = await resp.text();
+                        const blob = new Blob([text], { type: 'text/markdown' });
+                        const conv = this.conversations.find(c => c.id === this.currentConversationId);
+                        this._downloadBlob(blob, `${conv?.title || 'chat'}.md`);
+                    }
+                } catch (e) { console.error('Export failed:', e); }
+            },
+
+            _downloadBlob(blob, filename) {
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = filename;
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+                URL.revokeObjectURL(url);
+            },
+
+            // === Save individual message ===
+
+            saveMessageToFile(msg) {
+                // Strip thinking blocks for clean output
+                const thinkRegex = /<think>[\s\S]*?<\/think(?:\s+data-elapsed="\d+")?>/g;
+                const clean = (msg.content || '').replace(thinkRegex, '').trim();
+                if (!clean) return;
+                const blob = new Blob([clean], { type: 'text/markdown' });
+                const prefix = clean.substring(0, 30).replace(/[^a-zA-Z0-9]/g, '_').replace(/_+/g, '_');
+                this._downloadBlob(blob, `${prefix}.md`);
+            },
+
+            // === Rename ===
+
+            renameConversation(conv) {
+                const newTitle = prompt('Rename conversation:', conv.title || 'New Chat');
+                if (newTitle !== null && newTitle.trim()) {
+                    this.updateConversationTitle(newTitle.trim());
+                    conv.title = newTitle.trim();
+                }
+            },
+
+            // === Copy ===
+
+            copyMessage(content) {
+                const text = typeof content === 'string' ? content : '';
+                if (navigator.clipboard) {
+                    navigator.clipboard.writeText(text).catch(() => this._copyFallback(text));
+                } else {
+                    this._copyFallback(text);
+                }
+            },
+
+            _copyFallback(text) {
+                const ta = document.createElement('textarea');
+                ta.value = text;
+                ta.style.position = 'fixed';
+                ta.style.opacity = '0';
+                document.body.appendChild(ta);
+                ta.select();
+                document.execCommand('copy');
+                document.body.removeChild(ta);
+            },
+
+            // === Markdown Rendering ===
+
+            renderMarkdown(text) {
+                if (!text) return '';
+                try {
+                    const { thinkingBlocks, cleanText } = this.extractThinking(text);
+                    let html = DOMPurify.sanitize(marked.parse(cleanText));
+
+                    if (thinkingBlocks.length > 0) {
+                        const ts = Date.now();
+                        const thinkHtml = thinkingBlocks.map((b, i) =>
+                            this.renderThinkingBlock(b.content, i, ts, b.elapsed)
+                        ).join('');
+                        html = thinkHtml + html;
+                    }
+
+                    this.$nextTick(() => { this.addCodeCopyButtons(); this.renderMath(); });
+                    return html;
+                } catch (e) {
+                    return text.replace(/</g, '&lt;').replace(/>/g, '&gt;');
+                }
+            },
+
+            extractThinking(text) {
+                const regex = /<think>([\s\S]*?)<\/think(?:\s+data-elapsed="(\d+)")?>/g;
+                const blocks = [];
+                let match;
+                while ((match = regex.exec(text)) !== null) {
+                    blocks.push({ content: match[1].trim(), elapsed: match[2] ? parseInt(match[2]) : null });
+                }
+                const cleanText = text.replace(regex, '').trim();
+                return { thinkingBlocks: blocks, cleanText };
+            },
+
+            renderThinkingBlock(content, index, msgId, elapsed) {
+                const seconds = elapsed != null
+                    ? (elapsed / 1000).toFixed(1)
+                    : Math.max(1, Math.round(content.split(/\s+/).length / 3));
+                const uid = `${msgId}_${index}`;
+                const escaped = content.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\n/g, '<br>');
+                return `
+                    <div class="thinking-container">
+                        <div class="thinking-header" onclick="document.getElementById('tc-${uid}').classList.toggle('collapsed'); this.querySelector('.toggle-arrow').classList.toggle('collapsed');">
+                            <svg style="width:14px;height:14px;flex-shrink:0;" viewBox="0 0 20 20" fill="none"><circle cx="10" cy="10" r="9" stroke="currentColor" stroke-width="1.5"/><path d="M10 6v4l2.5 2.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+                            <span style="flex:1;">Thought for ${seconds}s</span>
+                            <svg class="toggle-arrow collapsed" style="width:12px;height:12px;" viewBox="0 0 10 6" fill="none"><path d="M1 1l4 4 4-4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+                        </div>
+                        <div class="thinking-content collapsed" id="tc-${uid}">${escaped}</div>
+                    </div>`;
+            },
+
+            // Streaming DOM update
+            // Track last rendered length to avoid redundant work
+            _lastRenderedLen: 0,
+            _renderTimer: null,
+            _lastStructure: '',  // 'think' | 'content' | '' — triggers full render on change
+
+            updateStreamingDOM() {
+                const el = this.$refs.streamingOutput;
+                if (!el) return;
+                if (!this.streamingContent) {
+                    el.innerHTML = '';
+                    this._lastRenderedLen = 0;
+                    this._lastStructure = '';
+                    return;
+                }
+
+                const text = this.streamingContent;
+                const lastOpen = text.lastIndexOf('<think>');
+                const lastClose = text.lastIndexOf('</think');
+                const isInThink = lastOpen !== -1 && lastClose < lastOpen;
+                const currentStructure = isInThink ? 'think' : 'content';
+
+                // Detect structural change (think → content transition)
+                const structureChanged = currentStructure !== this._lastStructure;
+
+                try {
+                    // === Fast path: thinking — just update inner text ===
+                    if (isInThink && !structureChanged) {
+                        const existingEl = el.querySelector('#streaming-think-content');
+                        if (existingEl) {
+                            const thinkContent = text.substring(lastOpen + 7);
+                            const escaped = thinkContent.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\n/g, '<br>');
+                            const wasAtBottom = existingEl.scrollHeight - existingEl.scrollTop - existingEl.clientHeight <= 30;
+                            existingEl.innerHTML = escaped;
+                            if (wasAtBottom) existingEl.scrollTop = existingEl.scrollHeight;
+                            this._scrollOuterIfEnabled();
+                            this._lastRenderedLen = text.length;
+                            return;
+                        }
+                    }
+
+                    // === Fast path: regular content — throttled markdown re-parse ===
+                    if (!isInThink && !structureChanged) {
+                        const contentEl = el.querySelector('#streaming-response-content');
+                        if (contentEl) {
+                            if (!this._renderTimer) {
+                                this._renderTimer = setTimeout(() => {
+                                    this._renderTimer = null;
+                                    const latest = this.streamingContent;
+                                    if (!latest) return;
+                                    const ce = el.querySelector('#streaming-response-content');
+                                    if (!ce) return;
+                                    const { cleanText } = this.extractThinking(latest);
+                                    if (!cleanText.trim()) return;
+                                    const newHtml = DOMPurify.sanitize(marked.parse(cleanText));
+                                    // Batch DOM write + scroll into one paint frame
+                                    requestAnimationFrame(() => {
+                                        ce.innerHTML = newHtml;
+                                        this.addCodeCopyButtons();
+                                        this._scrollOuterIfEnabled();
+                                    });
+                                }, 100);
+                            }
+                            this._lastRenderedLen = text.length;
+                            return;
+                        }
+                    }
+
+                    // === Full render: first render or structural change ===
+                    this._lastStructure = currentStructure;
+                    let html = '';
+
+                    if (isInThink) {
+                        const beforeThink = text.substring(0, lastOpen);
+                        const thinkContent = text.substring(lastOpen + 7);
+
+                        if (beforeThink) {
+                            const { thinkingBlocks, cleanText } = this.extractThinking(beforeThink);
+                            html += thinkingBlocks.map((b, i) =>
+                                this.renderThinkingBlock(b.content, i, 'stream', b.elapsed)
+                            ).join('');
+                            if (cleanText.trim()) html += DOMPurify.sanitize(marked.parse(cleanText));
+                        }
+
+                        const escaped = thinkContent.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\n/g, '<br>');
+                        html += `<div class="thinking-container"><div class="thinking-header" onclick="var c=this.parentElement.querySelector('.thinking-content');c.classList.toggle('collapsed');"><svg style="width:14px;height:14px;" viewBox="0 0 20 20" fill="none"><circle cx="10" cy="10" r="9" stroke="currentColor" stroke-width="1.5"/><path d="M10 6v4l2.5 2.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg><span style="flex:1;">Thinking...</span></div><div class="thinking-content" id="streaming-think-content" style="max-height:300px;overflow-y:auto;">${escaped}</div></div>`;
+                    } else {
+                        const { thinkingBlocks, cleanText } = this.extractThinking(text);
+                        html += thinkingBlocks.map((b, i) =>
+                            this.renderThinkingBlock(b.content, i, 'stream', b.elapsed)
+                        ).join('');
+                        if (cleanText.trim()) html += `<div id="streaming-response-content">${DOMPurify.sanitize(marked.parse(cleanText))}</div>`;
+                    }
+
+                    el.innerHTML = html;
+                    this._lastRenderedLen = text.length;
+                    this.$nextTick(() => { this.addCodeCopyButtons(); this.renderMath(); });
+                } catch (e) {
+                    el.textContent = this.streamingContent;
+                }
+            },
+
+            addCodeCopyButtons() {
+                const container = document.getElementById('messagesContainer');
+                if (!container) return;
+                container.querySelectorAll('pre code').forEach(block => {
+                    const pre = block.parentElement;
+                    if (!pre.parentElement?.classList.contains('code-block-wrapper')) {
+                        const wrapper = document.createElement('div');
+                        wrapper.className = 'code-block-wrapper';
+                        pre.parentElement.insertBefore(wrapper, pre);
+                        wrapper.appendChild(pre);
+                    }
+                    if (pre.parentElement.querySelector('.code-copy-btn')) return;
+                    const btn = document.createElement('button');
+                    btn.className = 'code-copy-btn';
+                    btn.textContent = 'Copy';
+                    btn.onclick = (e) => {
+                        e.preventDefault(); e.stopPropagation();
+                        this.copyMessage(block.textContent);
+                        btn.textContent = 'Copied!';
+                        setTimeout(() => btn.textContent = 'Copy', 2000);
+                    };
+                    pre.parentElement.appendChild(btn);
+                });
+            },
+
+            renderMath() {
+                if (typeof renderMathInElement === 'undefined') {
+                    setTimeout(() => this.renderMath(), 100);
+                    return;
+                }
+                const container = document.getElementById('messagesContainer');
+                if (!container) return;
+                try {
+                    renderMathInElement(container, {
+                        delimiters: [
+                            { left: '$$', right: '$$', display: true },
+                            { left: '$', right: '$', display: false },
+                            { left: '\\[', right: '\\]', display: true },
+                            { left: '\\(', right: '\\)', display: false },
+                        ],
+                        throwOnError: false, strict: false,
+                        ignoredTags: ['script','noscript','style','textarea','pre','code'],
+                        ignoredClasses: ['hljs'],
+                    });
+                } catch (e) { /* ignore */ }
+            },
+
+            // === Scroll ===
+
+            // Immediate, non-smooth scroll — called right after innerHTML update
+            _scrollOuterIfEnabled() {
+                if (!this.autoScrollEnabled) return;
+                const c = document.getElementById('messagesContainer');
+                if (c) c.scrollTop = c.scrollHeight;
+            },
+
+            setupScrollListener() {
+                const container = document.getElementById('messagesContainer');
+                if (!container) return;
+                container.addEventListener('scroll', () => {
+                    const threshold = 50;
+                    const isAtBottom = container.scrollHeight - container.scrollTop - container.clientHeight <= threshold;
+                    if (isAtBottom) this.autoScrollEnabled = true;
+                    else if (this.isStreaming) this.autoScrollEnabled = false;
+                });
+            },
+
+            scrollToBottom() {
+                if (!this.autoScrollEnabled) return;
+                this.$nextTick(() => {
+                    const c = document.getElementById('messagesContainer');
+                    if (c) c.scrollTo({ top: c.scrollHeight, behavior: 'smooth' });
+                });
+            },
+
+            forceScrollToBottom() {
+                this.autoScrollEnabled = true;
+                this.$nextTick(() => {
+                    const c = document.getElementById('messagesContainer');
+                    if (c) c.scrollTo({ top: c.scrollHeight, behavior: 'auto' });
+                });
+            },
+
+            autoResize(el) {
+                el.style.height = 'auto';
+                el.style.height = Math.min(el.scrollHeight, 150) + 'px';
+            },
+        };
+    }
+</script>
+</body>
+</html>
