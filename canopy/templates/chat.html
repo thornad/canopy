@@ -432,6 +432,74 @@
             outline: none; font-family: inherit; resize: vertical;
         }
 
+        /* Tree panel */
+        .tree-panel {
+            width: 280px; min-width: 180px;
+            border-left: 1px solid var(--border-faint);
+            background: var(--bg-secondary);
+            display: flex; flex-direction: column;
+            overflow: hidden;
+            position: relative;
+        }
+        .tree-panel.hidden { width: 0; min-width: 0; border: none; }
+        .tree-resize-handle {
+            position: absolute; left: -3px; top: 0; bottom: 0; width: 6px;
+            cursor: col-resize; z-index: 10;
+        }
+        .tree-resize-handle:hover, .tree-resize-handle.dragging {
+            background: var(--accent); opacity: 0.3;
+        }
+        .tree-panel-header {
+            padding: 12px 16px; border-bottom: 1px solid var(--border-faint);
+            font-size: 13px; font-weight: 600;
+            display: flex; align-items: center; justify-content: space-between;
+        }
+        .tree-panel-body {
+            flex: 1; overflow-y: auto; padding: 8px;
+        }
+        .tree-node {
+            display: flex; align-items: flex-start; gap: 6px;
+            padding: 4px 8px; margin: 1px 0;
+            border-radius: 6px; cursor: pointer;
+            font-size: 11px; line-height: 1.4;
+            transition: background 0.1s;
+            position: relative;
+        }
+        .tree-node:hover { background: var(--bg-tertiary); }
+        .tree-node.active { background: var(--accent-light); }
+        .tree-node .node-role {
+            flex-shrink: 0; width: 16px; height: 16px;
+            display: flex; align-items: center; justify-content: center;
+            border-radius: 50%; font-size: 9px; font-weight: 700;
+        }
+        .tree-node .node-role.user { background: var(--bg-tertiary); color: var(--text-secondary); }
+        .tree-node .node-role.assistant { background: var(--accent); color: white; }
+        .tree-node .node-text {
+            flex: 1; overflow: hidden; text-overflow: ellipsis;
+            white-space: nowrap; color: var(--text-secondary);
+        }
+        .tree-node.active .node-text { color: var(--text-primary); font-weight: 500; }
+        .tree-node .node-children-badge {
+            flex-shrink: 0; font-size: 9px; padding: 1px 5px;
+            border-radius: 8px; background: var(--bg-tertiary);
+            color: var(--text-muted);
+        }
+        .tree-indent { padding-left: 8px; }
+        .tree-branch {
+            margin: 2px 0; padding-left: 10px;
+            border-left: 2px solid var(--border-faint);
+            border-radius: 0 0 0 4px;
+        }
+        .tree-branch.active-branch { border-left-color: var(--accent); }
+        .tree-branch.inactive-branch { opacity: 0.55; }
+        .tree-branch.inactive-branch:hover { opacity: 0.85; }
+        .tree-branch-label {
+            font-size: 9px; font-weight: 600; letter-spacing: 0.5px;
+            text-transform: uppercase; color: var(--text-muted);
+            padding: 2px 4px; margin-bottom: 1px;
+        }
+        .tree-branch.active-branch .tree-branch-label { color: var(--accent); }
+
         /* Stats badge */
         .stats-badge {
             display: flex; align-items: center; gap: 3px;
@@ -541,6 +609,13 @@
             </div>
 
             <div style="display:flex;align-items:center;gap:4px;">
+                <!-- Tree view toggle -->
+                <button class="icon-btn" x-show="currentConversationId && Object.keys(messageTree).length > 0"
+                        @click="treeOpen = !treeOpen"
+                        :style="treeOpen ? 'color:var(--accent)' : ''"
+                        title="Toggle tree view" x-cloak>
+                    <i data-lucide="git-fork" style="width:18px;height:18px;"></i>
+                </button>
                 <!-- Cache stats badge -->
                 <div x-show="omlxStats.cache_efficiency !== null" x-cloak
                      class="stats-badge" :title="'Cache: ' + (omlxStats.cache_efficiency || 0).toFixed(1) + '% | ' + (omlxStats.avg_generation_tps || 0).toFixed(1) + ' tok/s'">
@@ -756,6 +831,26 @@
         </div>
     </div>
 
+    <!-- Tree Panel (inline, not overlay) -->
+    <div class="tree-panel" :class="{ hidden: !treeOpen }" x-ref="treePanel">
+        <div class="tree-resize-handle" @mousedown="startTreeResize($event)"></div>
+        <div class="tree-panel-header">
+            <span>Conversation Tree</span>
+            <button class="icon-btn" @click="treeOpen = false" style="width:24px;height:24px;">
+                <i data-lucide="x" style="width:14px;height:14px;"></i>
+            </button>
+        </div>
+        <div class="tree-panel-body custom-scrollbar">
+            <template x-if="Object.keys(messageTree).length > 0">
+                <div x-ref="treeContainer" x-effect="if (treeOpen) { activePath.length; $refs.treeContainer.innerHTML = renderTree(); $nextTick(() => lucide.createIcons()); }"></div>
+            </template>
+            <div x-show="Object.keys(messageTree).length === 0"
+                 style="text-align:center;padding:24px;color:var(--text-muted);font-size:12px;">
+                No messages yet
+            </div>
+        </div>
+    </div>
+
     <!-- Settings Panel -->
     <div class="settings-panel" :class="{ open: settingsOpen }">
         <div class="settings-header">
@@ -835,6 +930,9 @@
             availableModels: [],
             currentModel: null,
 
+            // Tree panel
+            treeOpen: false,
+
             // oMLX stats
             omlxStats: { cache_efficiency: null, avg_generation_tps: 0 },
 
@@ -862,7 +960,8 @@
                 this.applyTheme();
                 this.setupScrollListener();
                 this.pollOmlxStats();
-                setInterval(() => this.pollOmlxStats(), 15000); // refresh every 15s
+                setInterval(() => this.pollOmlxStats(), 15000);
+                this._registerTreeNav();
 
                 this.$watch('activePath', () => {
                     this.$nextTick(() => lucide.createIcons());
@@ -1102,6 +1201,112 @@
                 const siblings = this.getSiblings(msg);
                 const idx = siblings.indexOf(msg.id);
                 if (idx < siblings.length - 1) this.computeActivePath(siblings[idx + 1]);
+            },
+
+            // === Tree Rendering ===
+
+            renderTree() {
+                const activeIds = new Set(this.activePath.map(m => m.id));
+                const roots = this.childrenMap['__root__'] || [];
+                if (roots.length === 0) return '<div style="text-align:center;padding:16px;color:var(--text-muted);font-size:12px;">Empty</div>';
+                let html = '';
+                for (const id of roots) {
+                    html += this._renderTreeChain(id, activeIds);
+                }
+                return html;
+            },
+
+            _renderTreeChain(msgId, activeIds) {
+                let html = '';
+                let currentId = msgId;
+
+                while (currentId) {
+                    const msg = this.messageTree[currentId];
+                    if (!msg) break;
+
+                    const children = this.childrenMap[currentId] || [];
+                    html += this._renderTreeNodeHtml(msg, children.length, activeIds);
+
+                    if (children.length === 0) {
+                        break;
+                    } else if (children.length === 1) {
+                        currentId = children[0]; // linear, no indent
+                    } else {
+                        // Branch point — each child gets its own labeled branch
+                        html += `<div class="tree-indent">`;
+                        for (let i = 0; i < children.length; i++) {
+                            const cid = children[i];
+                            const branchActive = this._branchContainsActive(cid, activeIds);
+                            const cls = branchActive ? 'active-branch' : 'inactive-branch';
+                            html += `<div class="tree-branch ${cls}">`;
+                            html += `<div class="tree-branch-label">Branch ${i + 1}/${children.length}</div>`;
+                            html += this._renderTreeChain(cid, activeIds);
+                            html += `</div>`;
+                        }
+                        html += `</div>`;
+                        break;
+                    }
+                }
+                return html;
+            },
+
+            _branchContainsActive(msgId, activeIds) {
+                // Check if this message or any descendant is in the active path
+                if (activeIds.has(msgId)) return true;
+                const children = this.childrenMap[msgId] || [];
+                return children.some(cid => this._branchContainsActive(cid, activeIds));
+            },
+
+            _renderTreeNodeHtml(msg, childCount, activeIds) {
+                const isActive = activeIds.has(msg.id);
+                const isUser = msg.role === 'user';
+                const raw = (msg.content || '').replace(/<think>[\s\S]*?<\/think[^>]*>/g, '').trim();
+                const preview = raw.substring(0, 40).replace(/\n/g, ' ') || '...';
+                const hasBranch = childCount > 1;
+
+                let html = `<div class="tree-node ${isActive ? 'active' : ''}" onclick="window._canopyTreeNav('${msg.id}')">`;
+                html += `<div class="node-role ${isUser ? 'user' : 'assistant'}">${isUser ? 'U' : 'A'}</div>`;
+                html += `<div class="node-text" title="${this._escHtml(preview)}">${this._escHtml(preview)}</div>`;
+                if (hasBranch) {
+                    html += `<div class="node-children-badge">${childCount}</div>`;
+                }
+                html += `</div>`;
+                return html;
+            },
+
+            _escHtml(text) {
+                return text.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+            },
+
+            treeNavigate(msgId) {
+                this.computeActivePath(msgId);
+                this.$nextTick(() => lucide.createIcons());
+            },
+
+            _registerTreeNav() {
+                window._canopyTreeNav = (msgId) => this.treeNavigate(msgId);
+            },
+
+            startTreeResize(e) {
+                e.preventDefault();
+                const panel = this.$refs.treePanel;
+                const handle = e.target;
+                handle.classList.add('dragging');
+                const startX = e.clientX;
+                const startWidth = panel.offsetWidth;
+
+                const onMove = (ev) => {
+                    const delta = startX - ev.clientX; // dragging left = wider
+                    const newWidth = Math.max(180, Math.min(600, startWidth + delta));
+                    panel.style.width = newWidth + 'px';
+                };
+                const onUp = () => {
+                    handle.classList.remove('dragging');
+                    document.removeEventListener('mousemove', onMove);
+                    document.removeEventListener('mouseup', onUp);
+                };
+                document.addEventListener('mousemove', onMove);
+                document.addEventListener('mouseup', onUp);
             },
 
             // === Send Message ===
