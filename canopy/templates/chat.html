@@ -4,6 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Canopy</title>
+    <link rel="icon" href="/static/images/favicon.svg" type="image/svg+xml">
 
     <!-- Fonts -->
     <link rel="stylesheet" href="/static/fonts/inter/inter.css">
@@ -220,12 +221,11 @@
             padding: 8px 16px; max-width: 600px; font-size: 14px;
             line-height: 1.6; position: relative;
         }
-        .user-msg-wrapper { position: relative; }
-        .user-edit-btn {
-            position: absolute; left: -32px; top: 50%; transform: translateY(-50%);
-            opacity: 0; transition: opacity 0.15s;
+        .user-msg-wrapper { position: relative; display: flex; align-items: center; gap: 4px; }
+        .user-action-btn {
+            opacity: 0; transition: opacity 0.15s; flex-shrink: 0;
         }
-        .user-msg-wrapper:hover .user-edit-btn { opacity: 1; }
+        .user-msg-wrapper:hover .user-action-btn { opacity: 1; }
 
         .assistant-msg {
             background: var(--bg-primary);
@@ -514,6 +514,9 @@
         }
         .msg-stats span { display: flex; align-items: center; gap: 3px; }
 
+        /* Prefill status */
+        .prefill-cached { color: var(--accent) !important; font-weight: 500; }
+
         /* Drag-and-drop */
         .input-container.drag-over {
             border-color: var(--accent) !important;
@@ -646,13 +649,22 @@
             <!-- Active path messages -->
             <div class="messages-inner">
                 <template x-for="(msg, idx) in activePath" :key="msg.id">
-                    <div class="message">
+                    <div class="message" :data-msg-id="msg.id">
                         <!-- User message -->
                         <template x-if="msg.role === 'user'">
                             <div>
-                                <div class="user-msg">
+                                <div class="user-msg" style="gap:8px;align-items:center;">
+                                    <!-- Branch nav inline, left of bubble -->
+                                    <div x-show="getSiblingCount(msg) > 1" class="branch-nav" style="flex-shrink:0;">
+                                        <button @click="prevSibling(msg)" :disabled="getSiblingIndex(msg) === 0">&lt;</button>
+                                        <span x-text="(getSiblingIndex(msg) + 1) + '/' + getSiblingCount(msg)"></span>
+                                        <button @click="nextSibling(msg)" :disabled="getSiblingIndex(msg) >= getSiblingCount(msg) - 1">&gt;</button>
+                                    </div>
                                     <div class="user-msg-wrapper">
-                                        <div class="user-edit-btn" style="display:flex;flex-direction:column;gap:2px;">
+                                        <template x-if="editingMessageId !== msg.id">
+                                            <div class="user-bubble" x-html="renderMarkdown(msg.content)"></div>
+                                        </template>
+                                        <div class="user-action-btn" style="display:flex;flex-direction:column;gap:2px;">
                                             <button class="icon-btn" @click="startEdit(msg)"
                                                     title="Edit (creates branch)">
                                                 <i data-lucide="pencil" style="width:14px;height:14px;"></i>
@@ -662,9 +674,6 @@
                                                 <i data-lucide="trash-2" style="width:14px;height:14px;"></i>
                                             </button>
                                         </div>
-                                        <template x-if="editingMessageId !== msg.id">
-                                            <div class="user-bubble" x-html="renderMarkdown(msg.content)"></div>
-                                        </template>
                                         <template x-if="editingMessageId === msg.id">
                                             <div class="inline-edit">
                                                 <textarea x-model="editContent"
@@ -679,12 +688,6 @@
                                             </div>
                                         </template>
                                     </div>
-                                </div>
-                                <!-- Branch nav for user messages -->
-                                <div x-show="getSiblingCount(msg) > 1" class="branch-nav" style="justify-content:flex-end;padding-right:4px;">
-                                    <button @click="prevSibling(msg)" :disabled="getSiblingIndex(msg) === 0">&lt;</button>
-                                    <span x-text="(getSiblingIndex(msg) + 1) + '/' + getSiblingCount(msg)"></span>
-                                    <button @click="nextSibling(msg)" :disabled="getSiblingIndex(msg) >= getSiblingCount(msg) - 1">&gt;</button>
                                 </div>
                             </div>
                         </template>
@@ -768,10 +771,15 @@
                             </button>
                         </div>
                         <div class="msg-body">
-                            <div x-show="!streamingContent" class="loading-dots">
-                                <div class="loading-dot"></div>
-                                <div class="loading-dot"></div>
-                                <div class="loading-dot"></div>
+                            <!-- Prefill info line — persists above response -->
+                            <div x-show="prefillStatus" style="font-size:11px;color:var(--text-muted);padding-bottom:6px;border-bottom:1px solid var(--border-faint);margin-bottom:8px;display:flex;align-items:center;gap:6px;">
+                                <div x-show="!streamingContent" class="loading-dots" style="padding:0;">
+                                    <div class="loading-dot"></div>
+                                    <div class="loading-dot"></div>
+                                    <div class="loading-dot"></div>
+                                </div>
+                                <i x-show="streamingContent" data-lucide="zap" style="width:11px;height:11px;color:var(--accent);"></i>
+                                <span x-text="prefillStatus"></span>
                             </div>
                             <div x-show="streamingContent" class="markdown-content"
                                  x-ref="streamingOutput" x-effect="updateStreamingDOM()"></div>
@@ -933,6 +941,9 @@
             // Tree panel
             treeOpen: false,
 
+            // Branch selections: parentId → selectedChildId (remembers which branch at each fork)
+            branchSelections: {},
+
             // oMLX stats
             omlxStats: { cache_efficiency: null, avg_generation_tps: 0 },
 
@@ -945,6 +956,11 @@
             streamingContent: '',
             abortController: null,
             thinkingState: { isInThinking: false, startTime: null },
+
+            // Prefill status
+            prefillStatus: '',
+            _prefillStartTime: null,
+            _firstTokenReceived: false,
 
             // Edit
             editingMessageId: null,
@@ -1033,6 +1049,36 @@
 
             selectModel(id) { this.currentModel = id; },
 
+            async _fetchPrefillCacheInfo(ttft) {
+                try {
+                    const resp = await fetch('/api/omlx-stats');
+                    if (!resp.ok) return;
+                    const stats = await resp.json();
+                    if (stats.error) return;
+
+                    // Estimate cache hit from speed:
+                    // Normal prefill is avg_prefill_tps. If effective speed is much higher → cache hit.
+                    const normalSpeed = stats.avg_prefill_tps || 500;
+                    const totalChars = this.activePath.reduce((s, m) => {
+                        return s + ((m.content || '').replace(/<think>[\s\S]*?<\/think[^>]*>/g, '')).length;
+                    }, 0);
+                    const estimatedTokens = Math.round(totalChars / 4);
+                    const ttftNum = parseFloat(ttft);
+
+                    if (ttftNum > 0 && estimatedTokens > 0) {
+                        const effectiveSpeed = Math.round(estimatedTokens / ttftNum);
+                        if (effectiveSpeed > normalSpeed * 2) {
+                            // Significant cache hit
+                            const cachedRatio = Math.min(0.99, 1 - (normalSpeed / effectiveSpeed));
+                            const cachedTokens = Math.round(estimatedTokens * cachedRatio);
+                            this.prefillStatus = `Prefill ${ttft}s — ~${cachedTokens.toLocaleString()}/${estimatedTokens.toLocaleString()} tokens cached (${Math.round(cachedRatio * 100)}%)`;
+                        } else {
+                            this.prefillStatus = `Prefill ${ttft}s — ${effectiveSpeed.toLocaleString()} tok/s (${estimatedTokens.toLocaleString()} tokens)`;
+                        }
+                    }
+                } catch (e) { /* non-critical */ }
+            },
+
             async pollOmlxStats() {
                 try {
                     const resp = await fetch('/api/omlx-stats');
@@ -1083,6 +1129,7 @@
                     }
                     this.buildTree(conv.messages || []);
                     this.computeActivePath();
+                    this.treeOpen = this._hasBranches();
                 } catch (e) { console.error('Failed to load conversation:', e); }
                 this.sidebarOpen = window.innerWidth >= 768;
             },
@@ -1139,18 +1186,20 @@
                 let currentId;
 
                 if (startFromId) {
-                    // Walk up to root, then down
+                    // Walk up to root — and record each parent→child selection
                     const upPath = [];
                     let cid = startFromId;
                     while (cid) {
                         const msg = this.messageTree[cid];
                         if (!msg) break;
                         upPath.push(msg);
+                        // Record this node as the selected child of its parent
+                        const parentKey = msg.parent_id || '__root__';
+                        this.branchSelections[parentKey] = msg.id;
                         cid = msg.parent_id;
                     }
                     upPath.reverse();
                     path.push(...upPath);
-                    // Continue down from startFromId
                     currentId = startFromId;
                 } else {
                     // Start from most recent root
@@ -1160,11 +1209,19 @@
                     path.push(this.messageTree[currentId]);
                 }
 
-                // Follow most recent child at each level
+                // Follow selected child at each level (fall back to most recent)
                 while (true) {
                     const children = this.childrenMap[currentId] || [];
                     if (children.length === 0) break;
-                    currentId = children[children.length - 1];
+                    const selected = this.branchSelections[currentId];
+                    const parentForSelection = currentId;
+                    if (selected && children.includes(selected)) {
+                        currentId = selected;
+                    } else {
+                        currentId = children[children.length - 1];
+                    }
+                    // Record selection so switching branches and back remembers position
+                    this.branchSelections[parentForSelection] = currentId;
                     path.push(this.messageTree[currentId]);
                 }
 
@@ -1194,13 +1251,31 @@
             prevSibling(msg) {
                 const siblings = this.getSiblings(msg);
                 const idx = siblings.indexOf(msg.id);
-                if (idx > 0) this.computeActivePath(siblings[idx - 1]);
+                if (idx > 0) {
+                    const newId = siblings[idx - 1];
+                    const parentKey = msg.parent_id || '__root__';
+                    this.branchSelections[parentKey] = newId;
+                    this.computeActivePath(newId);
+                }
             },
 
             nextSibling(msg) {
                 const siblings = this.getSiblings(msg);
                 const idx = siblings.indexOf(msg.id);
-                if (idx < siblings.length - 1) this.computeActivePath(siblings[idx + 1]);
+                if (idx < siblings.length - 1) {
+                    const newId = siblings[idx + 1];
+                    const parentKey = msg.parent_id || '__root__';
+                    this.branchSelections[parentKey] = newId;
+                    this.computeActivePath(newId);
+                }
+            },
+
+            _hasBranches() {
+                // Check if any message has more than one child
+                for (const key in this.childrenMap) {
+                    if (this.childrenMap[key].length > 1) return true;
+                }
+                return false;
             },
 
             // === Tree Rendering ===
@@ -1280,7 +1355,21 @@
 
             treeNavigate(msgId) {
                 this.computeActivePath(msgId);
-                this.$nextTick(() => lucide.createIcons());
+                this.$nextTick(() => {
+                    lucide.createIcons();
+                    // Find the message by data attribute and scroll to its top
+                    requestAnimationFrame(() => {
+                        const el = document.querySelector(`[data-msg-id="${msgId}"]`);
+                        if (el) {
+                            el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                            // Brief highlight flash
+                            el.style.transition = 'background 0.3s';
+                            el.style.background = 'var(--accent-light)';
+                            el.style.borderRadius = '12px';
+                            setTimeout(() => { el.style.background = ''; }, 800);
+                        }
+                    });
+                });
             },
 
             _registerTreeNav() {
@@ -1377,6 +1466,16 @@
                 this.abortController = new AbortController();
                 this.autoScrollEnabled = true;
                 this.thinkingState = { isInThinking: false, startTime: null };
+                this._firstTokenReceived = false;
+                this._prefillStartTime = Date.now();
+
+                // Estimate prompt tokens from active path
+                const totalChars = this.activePath.reduce((sum, m) => {
+                    const c = (m.content || '').replace(/<think>[\s\S]*?<\/think[^>]*>/g, '');
+                    return sum + c.length;
+                }, 0);
+                const tokenEstimate = Math.round(totalChars / 4);
+                this.prefillStatus = `Sending ~${tokenEstimate.toLocaleString()} tokens...`;
 
                 try {
                     const response = await fetch('/api/chat', {
@@ -1428,6 +1527,16 @@
                                 }
 
                                 const delta = data.choices?.[0]?.delta;
+
+                                // First token — show prefill results
+                                if (!this._firstTokenReceived && (delta?.reasoning_content || delta?.content)) {
+                                    this._firstTokenReceived = true;
+                                    const ttft = ((Date.now() - this._prefillStartTime) / 1000).toFixed(1);
+                                    this.prefillStatus = `Prefill ${ttft}s`;
+                                    this._fetchPrefillCacheInfo(ttft);
+                                    this.forceScrollToBottom();
+                                }
+
                                 if (delta?.reasoning_content) {
                                     if (!this.thinkingState.isInThinking) {
                                         this.streamingContent += '<think>';
@@ -1966,8 +2075,10 @@
             forceScrollToBottom() {
                 this.autoScrollEnabled = true;
                 this.$nextTick(() => {
-                    const c = document.getElementById('messagesContainer');
-                    if (c) c.scrollTo({ top: c.scrollHeight, behavior: 'auto' });
+                    requestAnimationFrame(() => {
+                        const c = document.getElementById('messagesContainer');
+                        if (c) c.scrollTop = c.scrollHeight;
+                    });
                 });
             },
 
