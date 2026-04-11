@@ -132,7 +132,14 @@
         }
         .conv-item:hover { background: var(--bg-tertiary); }
         .conv-item.active { background: var(--bg-tertiary); }
-        .conv-item .conv-title { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .conv-item .conv-title-wrap {
+            flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px;
+        }
+        .conv-item .conv-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .conv-item .conv-time {
+            font-size: 10px; color: var(--text-muted);
+            overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+        }
         .conv-item .delete-btn {
             opacity: 0; background: none; border: none; cursor: pointer;
             color: var(--danger); padding: 4px; border-radius: 4px;
@@ -140,6 +147,19 @@
         }
         .conv-item:hover .delete-btn { opacity: 1; }
         .conv-item .delete-btn:hover { background: var(--danger-bg); }
+
+        /* Per-chat / per-node cache dot. Binary: blue if anything is cached
+           in the SSD cache, hollow otherwise. Hover tooltip shows the
+           percentage and block counts. */
+        .cache-dot {
+            width: 8px; height: 8px; border-radius: 50%;
+            flex-shrink: 0;
+            display: inline-block;
+            background: transparent;
+            box-shadow: inset 0 0 0 1px var(--border-faint);
+        }
+        .cache-dot.cache-cached    { background: #3b82f6; box-shadow: none; }
+        .cache-dot.cache-unknown   { background: transparent; }
 
         .sidebar-footer {
             padding: 8px; border-top: 1px solid var(--border-faint);
@@ -474,9 +494,24 @@
         }
         .tree-node .node-role.user { background: var(--bg-tertiary); color: var(--text-secondary); }
         .tree-node .node-role.assistant { background: var(--accent); color: white; }
+        .tree-node .node-body {
+            flex: 1; min-width: 0;
+            display: flex; flex-direction: column; gap: 1px;
+        }
         .tree-node .node-text {
-            flex: 1; overflow: hidden; text-overflow: ellipsis;
+            overflow: hidden; text-overflow: ellipsis;
             white-space: nowrap; color: var(--text-secondary);
+        }
+        .tree-node .node-meta {
+            display: flex; align-items: center; gap: 5px;
+            margin-top: 1px;
+        }
+        .tree-node .node-meta .cache-dot {
+            width: 7px; height: 7px;
+        }
+        .tree-node .node-time {
+            font-size: 9px; color: var(--text-muted);
+            overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
         }
         .tree-node.active .node-text { color: var(--text-primary); font-weight: 500; }
         .tree-node .node-children-badge {
@@ -561,7 +596,14 @@
                      @click="loadConversation(conv.id)"
                      @dblclick.stop="renameConversation(conv)">
                     <i data-lucide="message-square" style="width:14px;height:14px;color:var(--text-muted);flex-shrink:0;"></i>
-                    <span class="conv-title" x-text="conv.title || 'New Chat'"></span>
+                    <div class="conv-title-wrap">
+                        <span class="conv-title" x-text="conv.title || 'New Chat'"></span>
+                        <span class="conv-time"
+                              x-text="formatRelativeTime(conv.updated_at)"
+                              :title="formatAbsoluteTime(conv.updated_at)"></span>
+                    </div>
+                    <span class="cache-dot" :class="'cache-' + cacheTierFor(conv.id)"
+                          :title="cacheTitleFor(conv.id)"></span>
                     <button class="delete-btn" @click.stop="deleteConversation(conv.id)"
                             title="Delete">
                         <i data-lucide="trash-2" style="width:12px;height:12px;"></i>
@@ -792,6 +834,19 @@
         <!-- Input Area -->
         <div class="input-area">
             <div class="input-inner">
+                <!-- Context window usage -->
+                <div x-show="currentModel && modelContextWindows[currentModel] && activePath.length > 0"
+                     style="display:flex;align-items:center;gap:8px;margin-bottom:6px;padding:0 4px;" x-cloak>
+                    <div style="flex:1;height:3px;background:var(--bg-tertiary);border-radius:2px;overflow:hidden;">
+                        <div style="height:100%;border-radius:2px;transition:width 0.3s;"
+                             :style="{
+                                 width: Math.min(100, getContextUsagePercent()) + '%',
+                                 background: getContextUsagePercent() > 90 ? 'var(--danger)' : getContextUsagePercent() > 70 ? '#f59e0b' : 'var(--accent)'
+                             }"></div>
+                    </div>
+                    <span style="font-size:10px;color:var(--text-muted);white-space:nowrap;"
+                          x-text="getContextUsageLabel()"></span>
+                </div>
                 <div class="input-container" :class="{ 'drag-over': isDragOver }"
                      @dragover.prevent="isDragOver = true"
                      @dragleave.prevent="isDragOver = false"
@@ -946,6 +1001,13 @@
 
             // oMLX stats
             omlxStats: { cache_efficiency: null, avg_generation_tps: 0 },
+            modelContextWindows: {},  // modelId → max_context_window
+            // Per-conversation cache status (conversation_id → probe result)
+            cacheStatusMap: {},
+            // Per-message cache status for the active conversation's tree
+            // (message_id → probe result). Rebuilt when the chat changes
+            // and refreshed after streaming completes.
+            treeCacheMap: {},
 
             // Input
             inputText: '',
@@ -973,10 +1035,18 @@
                 await this.loadSettings();
                 await this.loadModels();
                 await this.loadConversations();
+                // Auto-select most recent chat on startup; only create a new
+                // one if no chats exist yet. Avoids polluting history with
+                // empty "New Chat" stubs on every launch.
+                if (this.conversations.length > 0) {
+                    await this.loadConversation(this.conversations[0].id);
+                }
+                await this.loadCacheStatus();
                 this.applyTheme();
                 this.setupScrollListener();
                 this.pollOmlxStats();
                 setInterval(() => this.pollOmlxStats(), 15000);
+                setInterval(() => this.loadCacheStatus(), 20000);
                 this._registerTreeNav();
 
                 this.$watch('activePath', () => {
@@ -984,6 +1054,14 @@
                 });
                 this.$watch('conversations', () => {
                     this.$nextTick(() => lucide.createIcons());
+                });
+                // Cache hashes are per-model, so re-probe everything when
+                // the user changes the model dropdown — otherwise the dots
+                // would still reflect the previous model's cache state.
+                this.$watch('currentModel', () => {
+                    this.loadCacheStatus();
+                    this.probeActiveBranch();
+                    this.loadTreeCacheStatus();
                 });
             },
 
@@ -1036,18 +1114,67 @@
 
             async loadModels() {
                 try {
-                    const resp = await fetch('/api/models');
-                    if (resp.ok) {
-                        const data = await resp.json();
+                    const [modelsResp, statusResp] = await Promise.all([
+                        fetch('/api/models'),
+                        fetch('/api/models/status'),
+                    ]);
+                    if (modelsResp.ok) {
+                        const data = await modelsResp.json();
                         this.availableModels = data.data || [];
-                        if (!this.currentModel && this.availableModels.length > 0) {
-                            this.currentModel = this.availableModels[0].id;
-                        }
+                        // Deliberately NO auto-select: the user picks the
+                        // model explicitly (or confirms the chat's last-used
+                        // model at send time). See sendMessage().
                     }
-                } catch (e) { /* oMLX not reachable — that's ok */ }
+                    if (statusResp.ok) {
+                        const status = await statusResp.json();
+                        const map = {};
+                        for (const m of (status.models || [])) {
+                            if (m.max_context_window) map[m.id] = m.max_context_window;
+                        }
+                        this.modelContextWindows = map;
+                    }
+                } catch (e) { /* oMLX not reachable */ }
             },
 
             selectModel(id) { this.currentModel = id; },
+
+            async _suggestModelForCurrentChat() {
+                // Prefer the conversation's stored model; fall back to the
+                // most recent message's model field. Returns '' if neither
+                // exists — caller handles the "no model anywhere" case.
+                if (!this.currentConversationId) return '';
+                const conv = this.conversations.find(c => c.id === this.currentConversationId);
+                if (conv && conv.model) return conv.model;
+                // Walk the active path backwards for the latest model tag.
+                for (let i = this.activePath.length - 1; i >= 0; i--) {
+                    const m = this.activePath[i];
+                    if (m.model) return m.model;
+                }
+                return '';
+            },
+
+            getContextTokenEstimate() {
+                return this.activePath.reduce((sum, m) => {
+                    const c = (m.content || '').replace(/<think>[\s\S]*?<\/think[^>]*>/g, '');
+                    return sum + Math.round(c.length / 4);
+                }, 0);
+            },
+
+            getContextUsagePercent() {
+                const max = this.modelContextWindows[this.currentModel];
+                if (!max) return 0;
+                return (this.getContextTokenEstimate() / max) * 100;
+            },
+
+            getContextUsageLabel() {
+                const used = this.getContextTokenEstimate();
+                const max = this.modelContextWindows[this.currentModel];
+                if (!max) return '';
+                const pct = Math.round((used / max) * 100);
+                const usedK = used >= 1000 ? (used / 1000).toFixed(1) + 'k' : used;
+                const maxK = max >= 1000 ? (max / 1000).toFixed(0) + 'k' : max;
+                return `${usedK} / ${maxK} tokens (${pct}%)`;
+            },
 
             async _fetchPrefillCacheInfo(ttft) {
                 try {
@@ -1098,7 +1225,181 @@
                 } catch (e) { console.error('Failed to load conversations:', e); }
             },
 
+            // --- Cache status ---
+            _modelOverrideParam() {
+                // Append ``&model=...`` so probes reflect the currently
+                // selected model instead of the chat's historical one.
+                // Cache hashes are per-model — switching models invalidates
+                // everything we're showing.
+                return this.currentModel
+                    ? `&model=${encodeURIComponent(this.currentModel)}`
+                    : '';
+            },
+
+            async loadCacheStatus() {
+                // Best-effort probe of all conversations' cache state. Fails
+                // silently when oMLX is unreachable or the model isn't loaded.
+                try {
+                    const override = this.currentModel
+                        ? `?model=${encodeURIComponent(this.currentModel)}`
+                        : '';
+                    const resp = await fetch('/api/cache-status' + override);
+                    if (resp.ok) {
+                        const data = await resp.json();
+                        // Merge instead of replace so the per-branch probe
+                        // for the active chat isn't clobbered by the bulk
+                        // (latest-leaf) probe.
+                        for (const [k, v] of Object.entries(data)) {
+                            if (k.startsWith('_')) continue;
+                            this.cacheStatusMap[k] = v;
+                        }
+                    }
+                } catch (e) { /* probe is best-effort */ }
+            },
+
+            async probeActiveBranch() {
+                // Probe the currently selected branch (activePath tip), so
+                // the sidebar dot on the active chat reflects the user's
+                // actual view rather than the DB's newest leaf.
+                if (!this.currentConversationId || this.activePath.length === 0) return;
+                const tip = this.activePath[this.activePath.length - 1];
+                try {
+                    const url = `/api/conversations/${this.currentConversationId}`
+                              + `/cache-probe?leaf_id=${encodeURIComponent(tip.id)}`
+                              + this._modelOverrideParam();
+                    const resp = await fetch(url);
+                    if (resp.ok) {
+                        const data = await resp.json();
+                        this.cacheStatusMap[this.currentConversationId] = data;
+                    }
+                } catch (e) { /* best-effort */ }
+            },
+
+            async loadTreeCacheStatus() {
+                // Per-node cache probes for the current conversation's tree.
+                // Each node is a potential "tip" with its own unique prefix
+                // — so the dot next to each node answers "what's cached if
+                // I continued from here". One batch request to amortize the
+                // oMLX login across all nodes.
+                if (!this.currentConversationId) return;
+                const ids = Object.keys(this.messageTree);
+                if (ids.length === 0) { this.treeCacheMap = {}; return; }
+                try {
+                    const resp = await fetch(
+                        `/api/conversations/${this.currentConversationId}/cache-probe-batch`,
+                        {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({
+                                message_ids: ids,
+                                model: this.currentModel || undefined,
+                            }),
+                        },
+                    );
+                    if (!resp.ok) return;
+                    const data = await resp.json();
+                    if (data && !data._error) {
+                        this.treeCacheMap = data;
+                        // Re-render tree if currently visible (x-effect
+                        // won't fire on a plain map mutation).
+                        if (this.treeOpen && this.$refs.treeContainer) {
+                            this.$refs.treeContainer.innerHTML = this.renderTree();
+                            this.$nextTick(() => lucide.createIcons());
+                        }
+                    }
+                } catch (e) { /* best-effort */ }
+            },
+
+            nodeCacheTier(msgId) {
+                const s = this.treeCacheMap[msgId];
+                if (!s || s.status !== 'ok' || !s.model_loaded) return 'unknown';
+                const cached = (s.blocks_ram || 0)
+                             + (s.blocks_ssd_hot || 0)
+                             + (s.blocks_ssd_disk || 0);
+                return cached > 0 ? 'cached' : 'unknown';
+            },
+
+            nodeCacheTitle(msgId) {
+                const s = this.treeCacheMap[msgId];
+                if (!s) return '';
+                if (s.status === 'no_model') return 'No model set';
+                if (s.status === 'empty') return 'No prefix';
+                if (s.status === 'error') return 'Probe failed';
+                if (!s.model_loaded) return 'Model not loaded';
+                const total = s.total_blocks || 0;
+                const cached = (s.blocks_ram || 0)
+                             + (s.blocks_ssd_hot || 0)
+                             + (s.blocks_ssd_disk || 0);
+                const pct = total ? Math.round((cached / total) * 100) : 0;
+                return `${pct}% cached (${cached}/${total} blocks · ${s.total_tokens} tokens)`;
+            },
+
+            // --- Time formatting ---
+            formatRelativeTime(ts) {
+                // Human-friendly relative time for sidebar / tree nodes.
+                // Falls back to a date for anything >7 days old.
+                if (!ts) return '';
+                const now = Date.now() / 1000;
+                const diff = now - ts;
+                if (diff < 60) return 'just now';
+                if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
+                if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
+                if (diff < 7 * 86400) return `${Math.floor(diff / 86400)}d ago`;
+                const d = new Date(ts * 1000);
+                return d.toLocaleDateString(undefined,
+                    { month: 'short', day: 'numeric' });
+            },
+
+            formatAbsoluteTime(ts) {
+                if (!ts) return '';
+                const d = new Date(ts * 1000);
+                return d.toLocaleString();
+            },
+
+            cacheTierFor(convId) {
+                // Binary: 'cached' (blue) if anything is in the SSD cache,
+                // 'unknown' (hollow) otherwise.
+                const s = this.cacheStatusMap[convId];
+                if (!s || s.status !== 'ok' || !s.model_loaded) return 'unknown';
+                const cached = (s.blocks_ram || 0)
+                             + (s.blocks_ssd_hot || 0)
+                             + (s.blocks_ssd_disk || 0);
+                return cached > 0 ? 'cached' : 'unknown';
+            },
+
+            cacheTitleFor(convId) {
+                const s = this.cacheStatusMap[convId];
+                if (!s) return '';
+                if (s.status === 'no_model') return 'No model set for this chat';
+                if (s.status === 'empty') return 'Empty chat';
+                if (s.status === 'error') return 'Cache probe failed';
+                if (!s.model_loaded) return 'Model not loaded — load it to probe cache';
+                const total = s.total_blocks || 0;
+                const cached = (s.blocks_ram || 0)
+                             + (s.blocks_ssd_hot || 0)
+                             + (s.blocks_ssd_disk || 0);
+                const pct = total ? Math.round((cached / total) * 100) : 0;
+                return `Cache: ${pct}% cached (${cached}/${total} blocks · ${s.total_tokens} tokens)`;
+            },
+
             async newChat() {
+                // If the current chat is still a blank "New Chat" with no
+                // messages, reuse it instead of creating yet another empty
+                // stub. Prevents accumulating phantom "New Chat" rows when
+                // the button is clicked multiple times without sending.
+                if (this.currentConversationId && this.activePath.length === 0) {
+                    const cur = this.conversations.find(
+                        c => c.id === this.currentConversationId);
+                    if (cur && (cur.title === 'New Chat' || !cur.title)) {
+                        this.pendingDocuments = [];
+                        this.sidebarOpen = window.innerWidth >= 768;
+                        this.$nextTick(() => {
+                            const ta = document.querySelector('.input-row textarea');
+                            if (ta) ta.focus();
+                        });
+                        return;
+                    }
+                }
                 try {
                     const resp = await fetch('/api/conversations', {
                         method: 'POST',
@@ -1124,14 +1425,22 @@
                     if (!resp.ok) return;
                     const conv = await resp.json();
                     this.currentConversationId = id;
-                    if (conv.model && this.availableModels.some(m => m.id === conv.model)) {
-                        this.currentModel = conv.model;
-                    }
+                    // Deliberately do NOT override currentModel here. The
+                    // user picks the model explicitly; at send time, if
+                    // it's still blank, sendMessage() confirms loading the
+                    // chat's previously-used model.
                     this.buildTree(conv.messages || []);
                     this.computeActivePath();
                     this.treeOpen = this._hasBranches();
                 } catch (e) { console.error('Failed to load conversation:', e); }
                 this.sidebarOpen = window.innerWidth >= 768;
+                // Probe the actual active branch (not the DB newest leaf)
+                // so the sidebar dot reflects what the user is viewing.
+                this.probeActiveBranch();
+                // Probe every node in the tree so each one shows its own
+                // cache dot — each node has a unique prefix so cache tier
+                // can differ at every point in the tree.
+                this.loadTreeCacheStatus();
             },
 
             async deleteConversation(id) {
@@ -1179,6 +1488,12 @@
                 const parentKey = msg.parent_id || '__root__';
                 if (!this.childrenMap[parentKey]) this.childrenMap[parentKey] = [];
                 this.childrenMap[parentKey].push(msg.id);
+                // Auto-open the tree panel the moment a branch first exists
+                // so the user doesn't have to toggle it manually after their
+                // first fork.
+                if (!this.treeOpen && this.childrenMap[parentKey].length > 1) {
+                    this.treeOpen = true;
+                }
             },
 
             computeActivePath(startFromId = null) {
@@ -1338,10 +1653,22 @@
                 const raw = (msg.content || '').replace(/<think>[\s\S]*?<\/think[^>]*>/g, '').trim();
                 const preview = raw.substring(0, 40).replace(/\n/g, ' ') || '...';
                 const hasBranch = childCount > 1;
+                const relTime = this.formatRelativeTime(msg.created_at);
+                const absTime = this.formatAbsoluteTime(msg.created_at);
+                const cacheTier = this.nodeCacheTier(msg.id);
+                const cacheTitle = this.nodeCacheTitle(msg.id);
 
                 let html = `<div class="tree-node ${isActive ? 'active' : ''}" onclick="window._canopyTreeNav('${msg.id}')">`;
                 html += `<div class="node-role ${isUser ? 'user' : 'assistant'}">${isUser ? 'U' : 'A'}</div>`;
-                html += `<div class="node-text" title="${this._escHtml(preview)}">${this._escHtml(preview)}</div>`;
+                html += `<div class="node-body">`;
+                html += `  <div class="node-text" title="${this._escHtml(preview)}">${this._escHtml(preview)}</div>`;
+                const metaParts = [];
+                metaParts.push(`<span class="cache-dot cache-${cacheTier}" title="${this._escHtml(cacheTitle)}"></span>`);
+                if (relTime) {
+                    metaParts.push(`<span class="node-time" title="${this._escHtml(absTime)}">${this._escHtml(relTime)}</span>`);
+                }
+                html += `  <div class="node-meta">${metaParts.join('')}</div>`;
+                html += `</div>`;
                 if (hasBranch) {
                     html += `<div class="node-children-badge">${childCount}</div>`;
                 }
@@ -1355,6 +1682,7 @@
 
             treeNavigate(msgId) {
                 this.computeActivePath(msgId);
+                this.probeActiveBranch();
                 this.$nextTick(() => {
                     lucide.createIcons();
                     // Find the message by data attribute and scroll to its top
@@ -1404,7 +1732,26 @@
                 const text = this.inputText.trim();
                 const docs = [...this.pendingDocuments];
                 if (!text && docs.length === 0) return;
-                if (!this.currentModel || this.isStreaming) return;
+                if (this.isStreaming) return;
+
+                // If no model is selected, propose the chat's last-used one
+                // (from conv.model, or the newest message's model). Only
+                // proceed if the user confirms — keeps model choice explicit
+                // and avoids silently auto-loading whichever model happens to
+                // be first alphabetically.
+                if (!this.currentModel) {
+                    const suggested = await this._suggestModelForCurrentChat();
+                    if (!suggested) {
+                        alert('Please select a model before sending.');
+                        return;
+                    }
+                    const ok = confirm(
+                        `No model is selected.\n\nLoad "${suggested}" ` +
+                        `(last used in this chat)?`
+                    );
+                    if (!ok) return;
+                    this.currentModel = suggested;
+                }
 
                 // Create conversation if needed
                 if (!this.currentConversationId) {
@@ -1610,6 +1957,12 @@
                     this._lastRenderedLen = 0;
                     this.$nextTick(() => lucide.createIcons());
                     this.pollOmlxStats(); // refresh stats after each response
+                    // Cache just grew — update the active branch's dot and
+                    // re-probe all tree nodes since new nodes were added.
+                    this.probeActiveBranch();
+                    this.loadTreeCacheStatus();
+                    // Also refresh conversations list so updated_at bumps.
+                    this.loadConversations();
                 }
             },
 
@@ -1672,9 +2025,22 @@
 
             async regenerate(msg) {
                 if (this.isStreaming) return;
-                // Stream a new assistant response as sibling — use same parent
+                // The new response is a SIBLING of ``msg`` (same parent),
+                // not a child of it. Truncate activePath so it ends at the
+                // parent — otherwise streamResponse's final push would
+                // append the new answer AFTER the old one in the view,
+                // making it look like a reply instead of a replacement.
                 const parentId = msg.parent_id;
                 if (!parentId) return;
+                const parentIdx = this.activePath.findIndex(m => m.id === parentId);
+                if (parentIdx >= 0) {
+                    this.activePath.splice(parentIdx + 1);
+                } else {
+                    // Parent isn't in the current active path (user is
+                    // viewing a different branch) — rebuild the path from
+                    // the parent so the new response lands in the right spot.
+                    this.computeActivePath(parentId);
+                }
                 this.forceScrollToBottom();
                 await this.streamResponse(parentId);
             },
