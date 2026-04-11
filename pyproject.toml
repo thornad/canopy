@@ -7,7 +7,7 @@ name = "canopy"
 dynamic = ["version"]
 description = "Cache-aware branching chat client for oMLX"
 requires-python = ">=3.11"
-license = {text = "MIT"}
+license = {text = "Apache-2.0"}
 dependencies = [
     "fastapi>=0.100.0",
     "uvicorn>=0.23.0",
