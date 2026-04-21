@@ -11,6 +11,8 @@ tangible instead of abstract.
 > Built for local oMLX development. Pairs with oMLX ≥ 0.3.5.dev2 (requires the
 > `/admin/api/cache/probe` endpoint).
 
+![Canopy UI](docs/images/canopy-ui.jpg)
+
 ## Features
 
 - **Prompt-tree conversations** — every send, regenerate, or edit creates a
