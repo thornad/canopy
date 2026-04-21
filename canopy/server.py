@@ -13,10 +13,13 @@ from fastapi.templating import Jinja2Templates
 
 from . import database as db
 from .documents import parse_document
+from .mcp import MCPClient, MCPError, parse_args_string, parse_env_string, registry as mcp_registry
 from .models import (
     ChatRequest,
     ConversationCreate,
     ConversationUpdate,
+    MCPServerCreate,
+    MCPServerUpdate,
     MessageCreate,
     SettingsUpdate,
 )
@@ -30,7 +33,12 @@ STATIC_DIR = BASE_DIR / "static"
 async def lifespan(app: FastAPI):
     db_path = getattr(app.state, "db_path", None)
     await db.init_db(db_path)
+    try:
+        await mcp_registry.sync(await db.list_mcp_servers())
+    except Exception:
+        pass
     yield
+    await mcp_registry.stop_all()
     await db.close_db()
 
 
@@ -77,6 +85,114 @@ async def update_settings(body: SettingsUpdate):
     if updates:
         await db.update_settings(updates)
     return await db.get_settings()
+
+
+# --- MCP servers ---
+
+
+def _mcp_row_out(row: dict) -> dict:
+    """DB row → API shape (join args/env back to strings for editing)."""
+    return {
+        "id": row["id"],
+        "name": row["name"],
+        "command": row["command"],
+        "args": " ".join(row.get("args") or []),
+        "env": "\n".join(f"{k}={v}" for k, v in (row.get("env") or {}).items()),
+        "enabled": bool(row.get("enabled")),
+    }
+
+
+async def _resync_mcp():
+    try:
+        await mcp_registry.sync(await db.list_mcp_servers())
+    except Exception:
+        pass
+
+
+@app.get("/api/mcp/servers")
+async def list_mcp():
+    servers = await db.list_mcp_servers()
+    status = mcp_registry.server_status()
+    out = []
+    for s in servers:
+        info = _mcp_row_out(s)
+        info["status"] = status.get(s["name"], {"running": False, "tool_count": 0, "tools": []})
+        out.append(info)
+    return out
+
+
+@app.post("/api/mcp/servers", status_code=201)
+async def add_mcp(body: MCPServerCreate):
+    if not body.name.strip() or not body.command.strip():
+        raise HTTPException(400, "name and command are required")
+    try:
+        server = await db.add_mcp_server(
+            name=body.name.strip(),
+            command=body.command.strip(),
+            args=parse_args_string(body.args),
+            env=parse_env_string(body.env),
+            enabled=body.enabled,
+        )
+    except Exception as e:
+        raise HTTPException(400, f"Could not add server: {e}")
+    await _resync_mcp()
+    status = mcp_registry.server_status().get(
+        server["name"], {"running": False, "tool_count": 0, "tools": []}
+    )
+    return {**_mcp_row_out(server), "status": status}
+
+
+@app.patch("/api/mcp/servers/{server_id}")
+async def patch_mcp(server_id: str, body: MCPServerUpdate):
+    updates: dict = {}
+    if body.name is not None:
+        updates["name"] = body.name.strip()
+    if body.command is not None:
+        updates["command"] = body.command.strip()
+    if body.args is not None:
+        updates["args"] = parse_args_string(body.args)
+    if body.env is not None:
+        updates["env"] = parse_env_string(body.env)
+    if body.enabled is not None:
+        updates["enabled"] = body.enabled
+    server = await db.update_mcp_server(server_id, **updates)
+    if server is None:
+        raise HTTPException(404, "MCP server not found")
+    await _resync_mcp()
+    status = mcp_registry.server_status().get(
+        server["name"], {"running": False, "tool_count": 0, "tools": []}
+    )
+    return {**_mcp_row_out(server), "status": status}
+
+
+@app.delete("/api/mcp/servers/{server_id}")
+async def delete_mcp(server_id: str):
+    ok = await db.delete_mcp_server(server_id)
+    if not ok:
+        raise HTTPException(404, "MCP server not found")
+    await _resync_mcp()
+    return {"deleted": True}
+
+
+@app.post("/api/mcp/servers/{server_id}/test")
+async def test_mcp(server_id: str):
+    server = await db.get_mcp_server(server_id)
+    if server is None:
+        raise HTTPException(404, "MCP server not found")
+    probe = MCPClient(
+        name=server["name"],
+        command=server["command"],
+        args=server["args"],
+        env=server["env"],
+    )
+    try:
+        await probe.start()
+        tools = [{"name": t["name"], "description": t.get("description", "")} for t in probe.tools]
+        return {"ok": True, "tool_count": len(tools), "tools": tools}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+    finally:
+        await probe.stop()
 
 
 # --- Conversations ---
@@ -153,6 +269,182 @@ async def delete_message(msg_id: str):
 # --- SSE Proxy to oMLX ---
 
 
+MCP_MAX_TURNS = 10
+
+
+async def _generate_with_tools(
+    body: ChatRequest,
+    messages: list[dict],
+    tool_specs: list[dict],
+    omlx_url: str,
+    headers: dict,
+):
+    """Iterative tool-calling loop with streaming pass-through.
+
+    Each turn is streamed from oMLX and forwarded raw to the UI so the
+    existing client-side parser sees ``reasoning_content`` and ``content``
+    deltas exactly as it would without tools. In parallel we accumulate
+    ``tool_calls`` across deltas; when a turn finishes with ``tool_calls``
+    we dispatch them via MCP, append the tool messages, and loop. When it
+    finishes with ``stop`` we save the final message and emit ``done``.
+    """
+    accumulated_reasoning = ""
+    final_content = ""
+    usage_total: dict = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+
+    def _merge_usage(u: dict) -> None:
+        for k in ("prompt_tokens", "completion_tokens", "total_tokens"):
+            v = u.get(k)
+            if v is not None:
+                usage_total[k] = (usage_total.get(k) or 0) + v
+
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(600.0, connect=10.0)) as client:
+            for _ in range(MCP_MAX_TURNS):
+                payload = {
+                    "model": body.model,
+                    "messages": messages,
+                    "tools": tool_specs,
+                    "stream": True,
+                    "stream_options": {"include_usage": True},
+                }
+
+                turn_reasoning = ""
+                turn_content = ""
+                turn_tool_calls: dict[int, dict] = {}
+                finish_reason: Optional[str] = None
+
+                async with client.stream(
+                    "POST",
+                    f"{omlx_url}/v1/chat/completions",
+                    json=payload,
+                    headers=headers,
+                ) as response:
+                    if response.status_code != 200:
+                        err = (await response.aread()).decode(errors="replace")
+                        yield f"data: {json.dumps({'error': err})}\n\n"
+                        return
+
+                    async for line in response.aiter_lines():
+                        if not line:
+                            continue
+                        # Swallow the per-turn [DONE] — we emit a single one at the
+                        # very end so the UI's done handling fires exactly once.
+                        if line.strip() == "data: [DONE]":
+                            continue
+                        # Forward deltas raw so the existing client parser
+                        # handles reasoning/content streaming unchanged.
+                        yield line + "\n\n"
+
+                        if not line.startswith("data: "):
+                            continue
+                        try:
+                            data = json.loads(line[6:])
+                        except json.JSONDecodeError:
+                            continue
+
+                        if "usage" in data and data["usage"]:
+                            _merge_usage(data["usage"])
+
+                        choices = data.get("choices") or []
+                        if not choices:
+                            continue
+                        ch0 = choices[0]
+                        delta = ch0.get("delta") or {}
+                        if delta.get("reasoning_content"):
+                            turn_reasoning += delta["reasoning_content"]
+                        if delta.get("content"):
+                            turn_content += delta["content"]
+                        for tc_delta in delta.get("tool_calls") or []:
+                            idx = tc_delta.get("index", 0)
+                            entry = turn_tool_calls.setdefault(
+                                idx,
+                                {"id": "", "type": "function", "function": {"name": "", "arguments": ""}},
+                            )
+                            if tc_delta.get("id"):
+                                entry["id"] = tc_delta["id"]
+                            fn = tc_delta.get("function") or {}
+                            if fn.get("name"):
+                                entry["function"]["name"] += fn["name"]
+                            if fn.get("arguments"):
+                                entry["function"]["arguments"] += fn["arguments"]
+                        fr = ch0.get("finish_reason")
+                        if fr:
+                            finish_reason = fr
+
+                accumulated_reasoning += turn_reasoning
+
+                if finish_reason == "tool_calls" and turn_tool_calls:
+                    tool_calls_list = [turn_tool_calls[i] for i in sorted(turn_tool_calls)]
+                    messages.append(
+                        {
+                            "role": "assistant",
+                            "content": turn_content,
+                            "tool_calls": tool_calls_list,
+                        }
+                    )
+                    for tc in tool_calls_list:
+                        fn = tc.get("function") or {}
+                        name = fn.get("name", "")
+                        raw_args = fn.get("arguments", "") or "{}"
+                        try:
+                            args = json.loads(raw_args) if isinstance(raw_args, str) else raw_args
+                        except json.JSONDecodeError:
+                            args = {}
+                        yield f"data: {json.dumps({'type': 'tool_call', 'name': name, 'arguments': args})}\n\n"
+                        try:
+                            result = await mcp_registry.call(name, args or {})
+                        except MCPError as e:
+                            result = f"[error] {e}"
+                        except Exception as e:
+                            result = f"[error] {e}"
+                        messages.append(
+                            {
+                                "role": "tool",
+                                "tool_call_id": tc.get("id", ""),
+                                "content": result,
+                            }
+                        )
+                        yield f"data: {json.dumps({'type': 'tool_result', 'name': name, 'content': result})}\n\n"
+                    continue
+
+                # No tool calls → this turn produced the final answer.
+                final_content = turn_content
+                break
+            else:
+                yield f"data: {json.dumps({'error': 'Exceeded max tool-call turns'})}\n\n"
+                return
+    except httpx.ConnectError:
+        yield f"data: {json.dumps({'error': f'Cannot connect to oMLX at {omlx_url}'})}\n\n"
+        return
+    except Exception as e:
+        yield f"data: {json.dumps({'error': str(e)})}\n\n"
+        return
+
+    yield "data: [DONE]\n\n"
+
+    full_content = ""
+    if accumulated_reasoning:
+        full_content += f"<think>{accumulated_reasoning}</think>"
+    full_content += final_content
+
+    if full_content:
+        saved = await db.add_message(
+            conversation_id=body.conversation_id,
+            role="assistant",
+            content=full_content,
+            parent_id=body.parent_id,
+            model=body.model,
+            token_count=len(full_content) // 4,
+        )
+        done_event = {
+            "type": "done",
+            "message_id": saved["id"],
+            "usage": usage_total,
+        }
+        yield f"data: {json.dumps(done_event)}\n\n"
+
+
 @app.post("/api/chat")
 async def chat_proxy(body: ChatRequest):
     """Stream chat completion from oMLX and save the assistant message."""
@@ -182,16 +474,24 @@ async def chat_proxy(body: ChatRequest):
             pass
         messages.append({"role": msg["role"], "content": content})
 
+    headers = {"Content-Type": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+
+    tool_specs = mcp_registry.tool_specs()
+
+    if tool_specs:
+        return StreamingResponse(
+            _generate_with_tools(body, messages, tool_specs, omlx_url, headers),
+            media_type="text/event-stream",
+        )
+
     payload = {
         "model": body.model,
         "messages": messages,
         "stream": True,
         "stream_options": {"include_usage": True},
     }
-
-    headers = {"Content-Type": "application/json"}
-    if api_key:
-        headers["Authorization"] = f"Bearer {api_key}"
 
     async def generate():
         full_content = ""

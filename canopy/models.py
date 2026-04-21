@@ -42,3 +42,19 @@ class DocumentParseResponse(BaseModel):
     filename: str
     content: str
     token_estimate: int
+
+
+class MCPServerCreate(BaseModel):
+    name: str
+    command: str
+    args: str = ""  # shell-style string, parsed server-side
+    env: str = ""   # KEY=VAL lines, parsed server-side
+    enabled: bool = True
+
+
+class MCPServerUpdate(BaseModel):
+    name: Optional[str] = None
+    command: Optional[str] = None
+    args: Optional[str] = None
+    env: Optional[str] = None
+    enabled: Optional[bool] = None

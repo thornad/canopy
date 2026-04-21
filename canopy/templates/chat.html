@@ -942,6 +942,62 @@
                 </div>
             </div>
             <div class="setting-group">
+                <div class="setting-label" style="display:flex;justify-content:space-between;align-items:center;">
+                    <span>MCP Servers</span>
+                    <button class="icon-btn"
+                            @click="mcpFormOpen ? cancelMcpForm() : (mcpEditingId = null, mcpForm = {name:'',command:'',args:'',env:''}, mcpFormError = '', mcpFormOpen = true, $nextTick(() => lucide.createIcons()))"
+                            style="width:24px;height:24px;" title="Add server">
+                        <i :data-lucide="mcpFormOpen ? 'x' : 'plus'" style="width:14px;height:14px;"></i>
+                    </button>
+                </div>
+                <template x-for="s in mcpServers" :key="s.id">
+                    <div style="border:1px solid var(--border-faint);border-radius:6px;padding:8px;margin-top:6px;">
+                        <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;">
+                            <div style="flex:1;min-width:0;">
+                                <div style="font-weight:500;font-size:13px;" x-text="s.name"></div>
+                                <div style="font-size:11px;color:var(--text-muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;"
+                                     x-text="s.command + (s.args ? ' ' + s.args : '')"></div>
+                            </div>
+                            <label style="display:flex;align-items:center;gap:4px;font-size:11px;cursor:pointer;">
+                                <input type="checkbox" :checked="s.enabled"
+                                       @change="toggleMcpServer(s)">
+                                <span x-text="s.enabled ? 'on' : 'off'"></span>
+                            </label>
+                        </div>
+                        <div style="display:flex;gap:6px;margin-top:6px;font-size:11px;align-items:center;">
+                            <button class="btn-secondary" style="padding:2px 8px;font-size:11px;" @click="editMcpServer(s)">Edit</button>
+                            <button class="btn-secondary" style="padding:2px 8px;font-size:11px;" @click="testMcpServer(s)">Test</button>
+                            <button class="btn-secondary" style="padding:2px 8px;font-size:11px;color:var(--danger);" @click="deleteMcpServer(s)">Delete</button>
+                            <span style="color:var(--text-muted);" x-show="s.status && s.status.running"
+                                  x-text="(s.status.tool_count || 0) + ' tools'"></span>
+                            <span style="color:var(--danger);" x-show="s.enabled && s.status && !s.status.running">not running</span>
+                            <span style="color:var(--accent);" x-show="mcpTestResult[s.id]" x-text="mcpTestResult[s.id]"></span>
+                        </div>
+                    </div>
+                </template>
+                <div x-show="mcpServers.length === 0" style="font-size:11px;color:var(--text-muted);margin-top:6px;">
+                    No MCP servers configured.
+                </div>
+
+                <div x-show="mcpFormOpen" x-cloak style="border:1px solid var(--border-faint);border-radius:6px;padding:8px;margin-top:8px;background:var(--bg-secondary);">
+                    <div style="font-size:11px;color:var(--text-muted);margin-bottom:6px;"
+                         x-text="mcpEditingId ? 'Edit MCP server' : 'New MCP server'"></div>
+                    <input class="setting-input" type="text" x-model="mcpForm.name" placeholder="Name (e.g. filesystem)">
+                    <input class="setting-input" type="text" x-model="mcpForm.command" placeholder="Command (e.g. npx)" style="margin-top:6px;">
+                    <input class="setting-input" type="text" x-model="mcpForm.args" placeholder="Args (e.g. -y @modelcontextprotocol/server-filesystem /tmp)" style="margin-top:6px;">
+                    <textarea class="setting-textarea" x-model="mcpForm.env"
+                              placeholder="Env (KEY=VAL per line, optional)"
+                              style="margin-top:6px;min-height:50px;"></textarea>
+                    <div style="display:flex;gap:6px;margin-top:6px;">
+                        <button class="btn-primary" style="flex:1;padding:4px 8px;font-size:12px;"
+                                @click="submitMcpForm()"
+                                x-text="mcpEditingId ? 'Save' : 'Add'"></button>
+                        <button class="btn-secondary" style="padding:4px 8px;font-size:12px;" @click="cancelMcpForm()">Cancel</button>
+                    </div>
+                    <div x-show="mcpFormError" x-cloak style="font-size:11px;color:var(--danger);margin-top:4px;" x-text="mcpFormError"></div>
+                </div>
+            </div>
+            <div class="setting-group">
                 <button class="btn-primary" @click="saveSettings()" style="width:100%;">Save Settings</button>
             </div>
         </div>
@@ -949,6 +1005,38 @@
     <!-- Settings overlay -->
     <div x-show="settingsOpen" @click="saveSettings()"
          style="position:fixed;inset:0;background:rgba(0,0,0,0.3);z-index:99;" x-cloak></div>
+
+    <!-- Model mismatch modal -->
+    <div x-show="modelMismatchOpen" x-cloak
+         @keydown.escape.window="_resolveModelChoice('cancel')"
+         style="position:fixed;inset:0;background:rgba(0,0,0,0.45);z-index:200;display:flex;align-items:center;justify-content:center;">
+        <div @click.stop
+             style="background:var(--bg-primary);border:1px solid var(--border-normal);border-radius:8px;padding:20px;max-width:440px;width:90%;box-shadow:0 10px 30px rgba(0,0,0,0.25);">
+            <div style="font-size:14px;font-weight:600;margin-bottom:8px;">Which model should generate this response?</div>
+            <div style="font-size:12px;color:var(--text-secondary);margin-bottom:16px;">
+                The earlier messages in this chat used a different model than the one currently selected. Pick one to continue with.
+            </div>
+            <div style="display:flex;flex-direction:column;gap:8px;">
+                <button class="btn-primary"
+                        style="padding:10px 14px;font-size:13px;text-align:left;"
+                        @click="_resolveModelChoice('historical')">
+                    <div style="font-size:11px;opacity:0.7;margin-bottom:2px;">Chat history</div>
+                    <div x-text="modelMismatchHistorical" style="font-family:ui-monospace,monospace;"></div>
+                </button>
+                <button class="btn-primary"
+                        style="padding:10px 14px;font-size:13px;text-align:left;"
+                        @click="_resolveModelChoice('current')">
+                    <div style="font-size:11px;opacity:0.7;margin-bottom:2px;">Currently selected</div>
+                    <div x-text="modelMismatchCurrent" style="font-family:ui-monospace,monospace;"></div>
+                </button>
+                <button class="btn-secondary"
+                        style="padding:8px 14px;font-size:13px;margin-top:4px;"
+                        @click="_resolveModelChoice('cancel')">
+                    Cancel
+                </button>
+            </div>
+        </div>
+    </div>
 </div>
 
 <script>
@@ -979,6 +1067,20 @@
                 system_prompt: '',
                 theme: 'light',
             },
+
+            // MCP servers
+            mcpServers: [],
+            mcpFormOpen: false,
+            mcpForm: { name: '', command: '', args: '', env: '' },
+            mcpFormError: '',
+            mcpTestResult: {},
+            mcpEditingId: null,
+
+            // Model mismatch modal
+            modelMismatchOpen: false,
+            modelMismatchHistorical: '',
+            modelMismatchCurrent: '',
+            _modelMismatchResolve: null,
 
             // Conversations
             conversations: [],
@@ -1033,6 +1135,7 @@
 
             async init() {
                 await this.loadSettings();
+                await this.loadMcpServers();
                 await this.loadModels();
                 await this.loadConversations();
                 // Auto-select most recent chat on startup; only create a new
@@ -1091,6 +1194,108 @@
                 await this.loadModels();
             },
 
+            // === MCP Servers ===
+
+            async loadMcpServers() {
+                try {
+                    const resp = await fetch('/api/mcp/servers');
+                    if (resp.ok) this.mcpServers = await resp.json();
+                } catch (e) { console.error('Failed to load MCP servers:', e); }
+            },
+
+            editMcpServer(s) {
+                this.mcpEditingId = s.id;
+                this.mcpForm = {
+                    name: s.name || '',
+                    command: s.command || '',
+                    args: s.args || '',
+                    env: s.env || '',
+                };
+                this.mcpFormError = '';
+                this.mcpFormOpen = true;
+                this.$nextTick(() => lucide.createIcons());
+            },
+
+            cancelMcpForm() {
+                this.mcpForm = { name: '', command: '', args: '', env: '' };
+                this.mcpEditingId = null;
+                this.mcpFormOpen = false;
+                this.mcpFormError = '';
+                this.$nextTick(() => lucide.createIcons());
+            },
+
+            async submitMcpForm() {
+                this.mcpFormError = '';
+                if (!this.mcpForm.name.trim() || !this.mcpForm.command.trim()) {
+                    this.mcpFormError = 'Name and command are required.';
+                    return;
+                }
+                const payload = {
+                    name: this.mcpForm.name.trim(),
+                    command: this.mcpForm.command.trim(),
+                    args: this.mcpForm.args,
+                    env: this.mcpForm.env,
+                };
+                const url = this.mcpEditingId
+                    ? '/api/mcp/servers/' + this.mcpEditingId
+                    : '/api/mcp/servers';
+                const method = this.mcpEditingId ? 'PATCH' : 'POST';
+                if (!this.mcpEditingId) payload.enabled = true;
+                try {
+                    const resp = await fetch(url, {
+                        method,
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(payload),
+                    });
+                    if (!resp.ok) {
+                        this.mcpFormError = (await resp.json()).detail || 'Failed to save.';
+                        return;
+                    }
+                    this.cancelMcpForm();
+                    await this.loadMcpServers();
+                } catch (e) {
+                    this.mcpFormError = String(e);
+                }
+            },
+
+            // back-compat alias in case older templates/bindings reference it
+            async addMcpServer() { await this.submitMcpForm(); },
+
+            async toggleMcpServer(s) {
+                try {
+                    await fetch('/api/mcp/servers/' + s.id, {
+                        method: 'PATCH',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ enabled: !s.enabled }),
+                    });
+                    await this.loadMcpServers();
+                } catch (e) { console.error('Failed to toggle MCP:', e); }
+            },
+
+            async deleteMcpServer(s) {
+                if (!confirm('Delete MCP server "' + s.name + '"?')) return;
+                try {
+                    await fetch('/api/mcp/servers/' + s.id, { method: 'DELETE' });
+                    await this.loadMcpServers();
+                } catch (e) { console.error('Failed to delete MCP:', e); }
+            },
+
+            async testMcpServer(s) {
+                this.mcpTestResult[s.id] = 'testing…';
+                try {
+                    const resp = await fetch('/api/mcp/servers/' + s.id + '/test', { method: 'POST' });
+                    const data = await resp.json();
+                    if (data.ok) {
+                        this.mcpTestResult[s.id] = `✓ ${data.tool_count} tools`;
+                    } else {
+                        this.mcpTestResult[s.id] = `✗ ${data.error}`;
+                    }
+                    setTimeout(() => { delete this.mcpTestResult[s.id]; }, 5000);
+                } catch (e) {
+                    this.mcpTestResult[s.id] = '✗ ' + e;
+                }
+            },
+
             // === Theme ===
 
             toggleTheme() {
@@ -1137,6 +1342,23 @@
             },
 
             selectModel(id) { this.currentModel = id; },
+
+            _promptModelChoice(historical, current) {
+                // Returns a promise that resolves to 'historical' | 'current' | 'cancel'
+                this.modelMismatchHistorical = historical;
+                this.modelMismatchCurrent = current;
+                this.modelMismatchOpen = true;
+                return new Promise((resolve) => {
+                    this._modelMismatchResolve = resolve;
+                });
+            },
+
+            _resolveModelChoice(choice) {
+                this.modelMismatchOpen = false;
+                const r = this._modelMismatchResolve;
+                this._modelMismatchResolve = null;
+                if (r) r(choice);
+            },
 
             async _suggestModelForCurrentChat() {
                 // Prefer the conversation's stored model; fall back to the
@@ -1751,6 +1973,27 @@
                     );
                     if (!ok) return;
                     this.currentModel = suggested;
+                } else {
+                    // Mismatch prompt: if the chat has prior messages tagged
+                    // with a different model, offer to switch. Remember the
+                    // user's choice for this (chat, currentModel) pair so we
+                    // don't re-prompt on every send.
+                    const historical = await this._suggestModelForCurrentChat();
+                    const convId = this.currentConversationId;
+                    if (
+                        historical &&
+                        historical !== this.currentModel &&
+                        this._modelMismatchAck?.[convId] !== this.currentModel
+                    ) {
+                        const choice = await this._promptModelChoice(historical, this.currentModel);
+                        if (choice === 'cancel') return;
+                        if (choice === 'historical') {
+                            this.currentModel = historical;
+                        } else {
+                            this._modelMismatchAck = this._modelMismatchAck || {};
+                            this._modelMismatchAck[convId] = this.currentModel;
+                        }
+                    }
                 }
 
                 // Create conversation if needed
@@ -1870,6 +2113,20 @@
 
                                 if (data.error) {
                                     this.streamingContent += `\n\n**Error:** ${data.error}`;
+                                    continue;
+                                }
+
+                                // MCP tool activity — surface a small status line so the user
+                                // can see what the model is calling. These never reach the
+                                // saved DB message (that's assembled server-side from the
+                                // final content chunk only).
+                                if (data.type === 'tool_call') {
+                                    const n = data.name || 'tool';
+                                    this.streamingContent += `\n\n_→ calling tool_ \`${n}\`…\n\n`;
+                                    this.forceScrollToBottom?.();
+                                    continue;
+                                }
+                                if (data.type === 'tool_result') {
                                     continue;
                                 }
 

@@ -1,5 +1,6 @@
 """SQLite database for Canopy conversations and messages."""
 
+import json
 import time
 import uuid
 from pathlib import Path
@@ -49,6 +50,16 @@ CREATE TABLE IF NOT EXISTS documents (
 CREATE TABLE IF NOT EXISTS settings (
     key TEXT PRIMARY KEY,
     value TEXT
+);
+
+CREATE TABLE IF NOT EXISTS mcp_servers (
+    id TEXT PRIMARY KEY,
+    name TEXT UNIQUE NOT NULL,
+    command TEXT NOT NULL,
+    args TEXT NOT NULL DEFAULT '[]',
+    env TEXT NOT NULL DEFAULT '{}',
+    enabled INTEGER NOT NULL DEFAULT 1,
+    created_at REAL
 );
 """
 
@@ -374,3 +385,87 @@ async def get_document(doc_id: str) -> Optional[dict]:
     )
     row = await cursor.fetchone()
     return dict(row) if row else None
+
+
+# --- MCP Servers ---
+
+
+def _decode_mcp_row(row) -> dict:
+    d = dict(row)
+    try:
+        d["args"] = json.loads(d.get("args") or "[]")
+    except (json.JSONDecodeError, TypeError):
+        d["args"] = []
+    try:
+        d["env"] = json.loads(d.get("env") or "{}")
+    except (json.JSONDecodeError, TypeError):
+        d["env"] = {}
+    d["enabled"] = bool(d.get("enabled"))
+    return d
+
+
+async def list_mcp_servers() -> list[dict]:
+    db = _get_db()
+    cursor = await db.execute(
+        "SELECT * FROM mcp_servers ORDER BY created_at"
+    )
+    rows = await cursor.fetchall()
+    return [_decode_mcp_row(r) for r in rows]
+
+
+async def get_mcp_server(server_id: str) -> Optional[dict]:
+    db = _get_db()
+    cursor = await db.execute(
+        "SELECT * FROM mcp_servers WHERE id = ?", (server_id,)
+    )
+    row = await cursor.fetchone()
+    return _decode_mcp_row(row) if row else None
+
+
+async def add_mcp_server(
+    name: str,
+    command: str,
+    args: list[str],
+    env: dict[str, str],
+    enabled: bool = True,
+) -> dict:
+    db = _get_db()
+    sid = _new_id()
+    now = time.time()
+    await db.execute(
+        "INSERT INTO mcp_servers (id, name, command, args, env, enabled, created_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (sid, name, command, json.dumps(args), json.dumps(env), int(enabled), now),
+    )
+    await db.commit()
+    return await get_mcp_server(sid)  # type: ignore[return-value]
+
+
+async def update_mcp_server(server_id: str, **kwargs) -> Optional[dict]:
+    db = _get_db()
+    allowed = {"name", "command", "args", "env", "enabled"}
+    updates = {k: v for k, v in kwargs.items() if k in allowed and v is not None}
+    if not updates:
+        return await get_mcp_server(server_id)
+    if "args" in updates:
+        updates["args"] = json.dumps(updates["args"])
+    if "env" in updates:
+        updates["env"] = json.dumps(updates["env"])
+    if "enabled" in updates:
+        updates["enabled"] = int(bool(updates["enabled"]))
+    set_clause = ", ".join(f"{k} = ?" for k in updates)
+    values = list(updates.values()) + [server_id]
+    await db.execute(
+        f"UPDATE mcp_servers SET {set_clause} WHERE id = ?", values
+    )
+    await db.commit()
+    return await get_mcp_server(server_id)
+
+
+async def delete_mcp_server(server_id: str) -> bool:
+    db = _get_db()
+    cursor = await db.execute(
+        "DELETE FROM mcp_servers WHERE id = ?", (server_id,)
+    )
+    await db.commit()
+    return cursor.rowcount > 0
