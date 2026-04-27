@@ -22,7 +22,7 @@ from Foundation import NSObject, NSRunLoop, NSDefaultRunLoopMode, NSTimer
 
 from canopy._version import __version__
 from .config import CanopyConfig
-from .server_manager import ServerManager, ServerStatus
+from .server_manager import PortConflict, ServerManager, ServerStatus
 from .updater import AppUpdater, GITHUB_REPO
 
 logger = logging.getLogger(__name__)
@@ -88,7 +88,9 @@ class CanopyAppDelegate(NSObject):
 
         # Auto-start server
         if self.config.start_on_launch:
-            self.server_manager.start()
+            result = self.server_manager.start()
+            if isinstance(result, PortConflict):
+                self._handle_port_conflict(result)
 
         self._build_menu()
 
@@ -213,7 +215,9 @@ class CanopyAppDelegate(NSObject):
     # --- Actions ---
 
     def startServer_(self, sender):
-        self.server_manager.start()
+        result = self.server_manager.start()
+        if isinstance(result, PortConflict):
+            self._handle_port_conflict(result)
         self._build_menu()
 
     def stopServer_(self, sender):
@@ -221,7 +225,54 @@ class CanopyAppDelegate(NSObject):
         self._build_menu()
 
     def restartServer_(self, sender):
-        self.server_manager.restart()
+        # Restart = stop, then start. Stop is a no-op for adopted servers,
+        # so this also handles "I want to take ownership of an adopted
+        # server" — the start that follows will hit PortConflict and let
+        # the user pick Adopt vs Kill & Restart.
+        self.server_manager.stop()
+        result = self.server_manager.start()
+        if isinstance(result, PortConflict):
+            self._handle_port_conflict(result)
+        self._build_menu()
+
+    # --- Port conflict dialog ---
+
+    def _handle_port_conflict(self, conflict: PortConflict) -> None:
+        """Prompt the user when chat_port is already taken."""
+        from AppKit import NSAlert, NSAlertFirstButtonReturn, NSAlertSecondButtonReturn
+
+        alert = NSAlert.alloc().init()
+        port = self.config.chat_port
+        pid_info = f" (PID {conflict.pid})" if conflict.pid else ""
+
+        if conflict.is_canopy:
+            alert.setMessageText_("Canopy Server Already Running")
+            alert.setInformativeText_(
+                f"A Canopy server is already running on port {port}{pid_info}.\n\n"
+                f"Adopt it (monitor without restarting) or kill it and start a new one."
+            )
+            alert.addButtonWithTitle_("Adopt")
+            alert.addButtonWithTitle_("Kill & Restart")
+            alert.addButtonWithTitle_("Cancel")
+
+            response = alert.runModal()
+            if response == NSAlertFirstButtonReturn:
+                if not self.server_manager.adopt():
+                    logger.error("Adopt failed — external server may have stopped")
+            elif response == NSAlertSecondButtonReturn:
+                if conflict.pid and self.server_manager.kill_external(conflict.pid):
+                    result = self.server_manager.start()
+                    if isinstance(result, PortConflict):
+                        logger.error("Port still in use after kill")
+        else:
+            alert.setMessageText_(f"Port {port} In Use")
+            alert.setInformativeText_(
+                f"Port {port} is held by another application{pid_info}.\n\n"
+                f"Stop that process, or change Canopy's port in Preferences."
+            )
+            alert.addButtonWithTitle_("OK")
+            alert.runModal()
+
         self._build_menu()
 
     def openChat_(self, sender):

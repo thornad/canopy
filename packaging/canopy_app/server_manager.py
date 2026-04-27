@@ -3,13 +3,15 @@
 import logging
 import os
 import signal
+import socket
 import subprocess
 import sys
 import threading
 import time
+from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Union
 
 import requests
 
@@ -24,6 +26,18 @@ class ServerStatus(Enum):
     RUNNING = "running"
     STOPPING = "stopping"
     ERROR = "error"
+
+
+@dataclass
+class PortConflict:
+    """Returned by start() when chat_port is already in use.
+
+    The app uses ``is_canopy`` to decide between the "Adopt" path
+    (a Canopy server is already running — monitor it) and the
+    "kill or change port" path (something else holds the port).
+    """
+    pid: Optional[int]
+    is_canopy: bool
 
 
 def _get_python() -> str:
@@ -49,21 +63,50 @@ class ServerManager:
         self._restart_count = 0
         self._last_stable_time = 0.0
         self._on_status_change = None
+        # When True, an external Canopy server holds chat_port and we
+        # only monitor its health — we did not spawn it and must not
+        # kill it. stop() honours this; the health loop reports ERROR
+        # rather than auto-restarting if the external server dies.
+        self._adopted = False
 
     def set_status_callback(self, callback):
         self._on_status_change = callback
 
     def _update_status(self, new_status: ServerStatus):
+        # Once stop() has signalled shutdown, refuse to flip back to
+        # RUNNING — the health loop may still be mid-iteration when
+        # stop() runs, and we don't want a late check_health() to
+        # overwrite the STOPPED status the caller just set.
+        if (
+            new_status == ServerStatus.RUNNING
+            and self._stop_event.is_set()
+        ):
+            return
         if self.status != new_status:
             self.status = new_status
             if self._on_status_change:
                 self._on_status_change(new_status)
 
-    def start(self) -> bool:
-        """Start the Canopy server. Returns True on success."""
+    def start(self) -> Union[bool, PortConflict]:
+        """Start the Canopy server.
+
+        Returns ``True`` on a clean spawn, ``False`` on a spawn error
+        unrelated to port conflict, or a ``PortConflict`` describing
+        the existing port owner so the caller can offer Adopt /
+        Kill & Restart in the UI.
+        """
         if self.status in (ServerStatus.RUNNING, ServerStatus.STARTING):
             return True
 
+        # Pre-flight: refuse to spawn if chat_port is already taken.
+        # Two outcomes worth distinguishing for the user:
+        #   - It's a Canopy server already → offer to adopt it.
+        #   - It's something else → tell them and let them change ports.
+        if self._is_port_in_use():
+            pid = self._find_port_owner_pid()
+            return PortConflict(pid=pid, is_canopy=self._is_canopy_server())
+
+        self._adopted = False
         self._update_status(ServerStatus.STARTING)
         self._stop_event.clear()
 
@@ -92,13 +135,87 @@ class ServerManager:
 
         return True
 
+    # --- Port conflict / adoption ---
+
+    def _is_port_in_use(self) -> bool:
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.settimeout(1)
+                s.connect(("127.0.0.1", self.config.chat_port))
+                return True
+        except (ConnectionRefusedError, OSError):
+            return False
+
+    def _is_canopy_server(self) -> bool:
+        """Probe /api/health to confirm the port owner is a Canopy server."""
+        return self.check_health()
+
+    def _find_port_owner_pid(self) -> Optional[int]:
+        try:
+            result = subprocess.run(
+                ["lsof", "-ti", f":{self.config.chat_port}", "-sTCP:LISTEN"],
+                capture_output=True, text=True, timeout=5,
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                return int(result.stdout.strip().splitlines()[0])
+        except Exception as e:
+            logger.debug(f"lsof failed: {e}")
+        return None
+
+    def kill_external(self, pid: int) -> bool:
+        """SIGTERM, then SIGKILL after 5s, an external server we don't own."""
+        try:
+            os.kill(pid, signal.SIGTERM)
+            for _ in range(50):  # ≤ 5s
+                time.sleep(0.1)
+                try:
+                    os.kill(pid, 0)
+                except OSError:
+                    return True
+            os.kill(pid, signal.SIGKILL)
+            time.sleep(0.5)
+            return True
+        except OSError as e:
+            logger.error(f"Failed to kill PID {pid}: {e}")
+            return False
+
+    def adopt(self) -> bool:
+        """Take over monitoring of an externally-running Canopy server.
+
+        Sets ``_adopted`` so stop() won't kill the foreign process and
+        the health loop reports ERROR (not auto-restart) if it dies.
+        """
+        if not self._is_canopy_server():
+            return False
+
+        self._adopted = True
+        self._process = None
+        self._stop_event.clear()
+        self._update_status(ServerStatus.RUNNING)
+        self._last_stable_time = time.time()
+
+        self._health_thread = threading.Thread(target=self._health_loop, daemon=True)
+        self._health_thread.start()
+        logger.info(f"Adopted external Canopy server on port {self.config.chat_port}")
+        return True
+
     def stop(self, timeout: float = 10.0):
-        """Stop the server gracefully."""
+        """Stop the server gracefully.
+
+        Adopted servers: we did not start the process, so we only stop
+        monitoring it — the external process keeps running.
+        """
         if self.status == ServerStatus.STOPPED:
             return
 
         self._update_status(ServerStatus.STOPPING)
         self._stop_event.set()
+
+        if self._adopted:
+            self._adopted = False
+            self._restart_count = 0
+            self._update_status(ServerStatus.STOPPED)
+            return
 
         if self._process and self._process.poll() is None:
             try:
@@ -114,11 +231,6 @@ class ServerManager:
         self._process = None
         self._restart_count = 0
         self._update_status(ServerStatus.STOPPED)
-
-    def restart(self):
-        self.stop()
-        time.sleep(0.5)
-        self.start()
 
     def check_health(self) -> bool:
         """Check if server is responding."""
@@ -181,6 +293,13 @@ class ServerManager:
                     self._last_stable_time = time.time()
             else:
                 fail_count += 1
+                if self._adopted:
+                    # External server we don't own — don't auto-restart,
+                    # just report it stopped responding.
+                    logger.warning("Adopted Canopy server stopped responding")
+                    self._adopted = False
+                    self._update_status(ServerStatus.ERROR)
+                    return
                 if fail_count >= 3:
                     logger.warning("Server unresponsive (3 consecutive health check failures)")
                     self._update_status(ServerStatus.ERROR)
