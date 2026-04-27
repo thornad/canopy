@@ -2,7 +2,7 @@
 
 from typing import Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class ConversationCreate(BaseModel):
@@ -11,10 +11,22 @@ class ConversationCreate(BaseModel):
     model: str = ""
 
 
+# `folder_id` uses a sentinel default ("__unset__") to distinguish "client
+# didn't send the field" from "client sent null to unfile the chat" — the
+# default `Optional[str] = None` would conflate the two and prevent unfiling.
 class ConversationUpdate(BaseModel):
     title: Optional[str] = None
     system_prompt: Optional[str] = None
     model: Optional[str] = None
+    folder_id: Optional[str] = Field(default="__unset__")
+
+
+class FolderCreate(BaseModel):
+    name: str
+
+
+class FolderUpdate(BaseModel):
+    name: str
 
 
 class MessageCreate(BaseModel):

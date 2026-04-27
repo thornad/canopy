@@ -34,6 +34,10 @@ tangible instead of abstract.
   glance what's stale.
 - **Document ingestion** — drop PDFs, DOCX, or markdown into a chat to
   add them to the context.
+- **Folders & renaming** — group chats into folders from the sidebar.
+  Right-click any chat for **Rename**, **Move to** *(folder list +
+  "New folder…" + "Remove from folder")*, and **Delete**. Folder
+  expansion state is remembered across reloads.
 
 ## Install
 

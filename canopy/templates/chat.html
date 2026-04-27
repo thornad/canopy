@@ -148,6 +148,87 @@
         .conv-item:hover .delete-btn { opacity: 1; }
         .conv-item .delete-btn:hover { background: var(--danger-bg); }
 
+        /* Folders */
+        .folder-row {
+            display: flex; align-items: center; gap: 6px;
+            padding: 6px 10px; border-radius: 6px; cursor: pointer;
+            font-size: 12px; font-weight: 500;
+            color: var(--text-secondary);
+            margin: 6px 0 2px; user-select: none;
+            position: relative;
+        }
+        .folder-row:hover { background: var(--bg-tertiary); }
+        .folder-row .folder-chev {
+            transition: transform 0.1s; flex-shrink: 0;
+            color: var(--text-muted);
+        }
+        .folder-row.expanded .folder-chev { transform: rotate(90deg); }
+        .folder-row .folder-name {
+            flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+        }
+        .folder-row .folder-count {
+            font-size: 10px; color: var(--text-muted);
+            font-weight: normal;
+        }
+        .folder-row .folder-actions {
+            display: flex; gap: 2px; opacity: 0;
+            transition: opacity 0.15s;
+        }
+        .folder-row:hover .folder-actions { opacity: 1; }
+        .folder-row .folder-actions button {
+            background: none; border: none; cursor: pointer;
+            color: var(--text-tertiary); padding: 2px; border-radius: 4px;
+            display: flex; align-items: center;
+        }
+        .folder-row .folder-actions button:hover {
+            background: var(--bg-primary); color: var(--text-primary);
+        }
+        .folder-children { padding-left: 14px; }
+        .new-folder-btn {
+            margin: 0 8px 4px; padding: 6px 10px;
+            background: none; border: 1px dashed var(--border-faint);
+            border-radius: 6px; cursor: pointer;
+            font-size: 12px; color: var(--text-tertiary);
+            display: flex; align-items: center; gap: 6px;
+            width: calc(100% - 16px);
+        }
+        .new-folder-btn:hover {
+            color: var(--text-primary); border-color: var(--border-normal);
+            background: var(--bg-tertiary);
+        }
+
+        /* Sidebar context menu (right-click on a chat) */
+        .ctx-menu {
+            position: fixed; z-index: 200;
+            background: var(--bg-primary);
+            border: 1px solid var(--border-faint);
+            border-radius: 8px; padding: 4px;
+            min-width: 180px;
+            box-shadow: 0 4px 16px rgba(0,0,0,0.15);
+            font-size: 13px;
+        }
+        .ctx-menu button, .ctx-menu .ctx-item {
+            display: flex; align-items: center; gap: 8px;
+            width: 100%; padding: 6px 10px;
+            background: none; border: none; cursor: pointer;
+            color: var(--text-primary); border-radius: 4px;
+            text-align: left; font-size: 13px;
+        }
+        .ctx-menu button:hover, .ctx-menu .ctx-item:hover {
+            background: var(--bg-tertiary);
+        }
+        .ctx-menu .ctx-divider {
+            height: 1px; background: var(--border-faint);
+            margin: 4px 0;
+        }
+        .ctx-menu .ctx-section-label {
+            padding: 4px 10px 2px; font-size: 10px;
+            color: var(--text-muted); text-transform: uppercase;
+            letter-spacing: 0.05em;
+        }
+        .ctx-menu .ctx-danger { color: var(--danger); }
+        .ctx-menu .ctx-danger:hover { background: var(--danger-bg); }
+
         /* Per-chat / per-node cache dot. Binary: blue if anything is cached
            in the SSD cache, hollow otherwise. Hover tooltip shows the
            percentage and block counts. */
@@ -590,12 +671,57 @@
             <i data-lucide="plus" style="width:16px;height:16px;"></i>
             New Chat
         </button>
+        <button class="new-folder-btn" @click="createFolder()">
+            <i data-lucide="folder-plus" style="width:14px;height:14px;"></i>
+            New Folder
+        </button>
         <div class="conv-list custom-scrollbar">
-            <template x-for="conv in conversations" :key="conv.id">
+            <!-- Folders (rendered above unfiled chats) -->
+            <template x-for="folder in folders" :key="folder.id">
+                <div>
+                    <div class="folder-row" :class="{ expanded: !!expandedFolders[folder.id] }"
+                         @click="toggleFolder(folder.id)">
+                        <i class="folder-chev" data-lucide="chevron-right" style="width:12px;height:12px;"></i>
+                        <i data-lucide="folder" style="width:14px;height:14px;color:var(--accent);flex-shrink:0;"></i>
+                        <span class="folder-name" x-text="folder.name"></span>
+                        <span class="folder-count" x-text="convsInFolder(folder.id).length"></span>
+                        <span class="folder-actions">
+                            <button @click.stop="renameFolder(folder)" title="Rename folder">
+                                <i data-lucide="pencil" style="width:12px;height:12px;"></i>
+                            </button>
+                            <button @click.stop="deleteFolderPrompt(folder)" title="Delete folder">
+                                <i data-lucide="trash-2" style="width:12px;height:12px;"></i>
+                            </button>
+                        </span>
+                    </div>
+                    <div class="folder-children" x-show="expandedFolders[folder.id]" x-cloak>
+                        <template x-for="conv in convsInFolder(folder.id)" :key="conv.id">
+                            <div class="conv-item" :class="{ active: currentConversationId === conv.id }"
+                                 @click="loadConversation(conv.id)"
+                                 @contextmenu.prevent="openConvContextMenu($event, conv)">
+                                <div class="conv-title-wrap">
+                                    <span class="conv-title" x-text="conv.title || 'New Chat'"></span>
+                                    <span class="conv-time"
+                                          x-text="formatRelativeTime(conv.updated_at)"
+                                          :title="formatAbsoluteTime(conv.updated_at)"></span>
+                                </div>
+                                <span class="cache-dot" :class="'cache-' + cacheTierFor(conv.id)"
+                                      :title="cacheTitleFor(conv.id)"></span>
+                                <button class="delete-btn" @click.stop="deleteConversation(conv.id)"
+                                        title="Delete">
+                                    <i data-lucide="trash-2" style="width:12px;height:12px;"></i>
+                                </button>
+                            </div>
+                        </template>
+                    </div>
+                </div>
+            </template>
+
+            <!-- Unfiled conversations (below folders) -->
+            <template x-for="conv in unfiledConversations" :key="conv.id">
                 <div class="conv-item" :class="{ active: currentConversationId === conv.id }"
                      @click="loadConversation(conv.id)"
-                     @dblclick.stop="renameConversation(conv)">
-                    <i data-lucide="message-square" style="width:14px;height:14px;color:var(--text-muted);flex-shrink:0;"></i>
+                     @contextmenu.prevent="openConvContextMenu($event, conv)">
                     <div class="conv-title-wrap">
                         <span class="conv-title" x-text="conv.title || 'New Chat'"></span>
                         <span class="conv-time"
@@ -734,8 +860,9 @@
                             </div>
                         </template>
 
-                        <!-- Assistant message -->
-                        <template x-if="msg.role === 'assistant'">
+                        <!-- Assistant message (hide intermediate tool-call turns — tool_calls rows and
+                             tool-response rows live in the DB for cache replay only) -->
+                        <template x-if="msg.role === 'assistant' && !msg.tool_calls">
                             <div>
                                 <div class="assistant-msg">
                                     <div class="msg-header">
@@ -1037,6 +1164,39 @@
             </div>
         </div>
     </div>
+
+    <!-- Sidebar context menu (right-click on a chat) -->
+    <div class="ctx-menu" x-show="contextMenu.open" x-cloak
+         @click.outside="closeContextMenu()"
+         @keydown.escape.window="closeContextMenu()"
+         :style="`left:${contextMenu.x}px; top:${contextMenu.y}px;`">
+        <button @click="ctxRename()">
+            <i data-lucide="pencil" style="width:14px;height:14px;"></i>
+            Rename
+        </button>
+        <div class="ctx-divider"></div>
+        <div class="ctx-section-label">Move to</div>
+        <button @click="ctxMove(null)" x-show="contextMenu.conv && contextMenu.conv.folder_id">
+            <i data-lucide="x" style="width:14px;height:14px;"></i>
+            Remove from folder
+        </button>
+        <template x-for="folder in folders" :key="folder.id">
+            <button @click="ctxMove(folder.id)"
+                    x-show="!contextMenu.conv || contextMenu.conv.folder_id !== folder.id">
+                <i data-lucide="folder" style="width:14px;height:14px;"></i>
+                <span x-text="folder.name"></span>
+            </button>
+        </template>
+        <button @click="ctxNewFolderAndMove()">
+            <i data-lucide="folder-plus" style="width:14px;height:14px;"></i>
+            New folder…
+        </button>
+        <div class="ctx-divider"></div>
+        <button class="ctx-danger" @click="ctxDelete()">
+            <i data-lucide="trash-2" style="width:14px;height:14px;"></i>
+            Delete
+        </button>
+    </div>
 </div>
 
 <script>
@@ -1085,6 +1245,15 @@
             // Conversations
             conversations: [],
             currentConversationId: null,
+
+            // Folders (sidebar grouping)
+            folders: [],
+            expandedFolders: (() => {
+                try { return JSON.parse(localStorage.getItem('canopy-expanded-folders') || '{}'); }
+                catch { return {}; }
+            })(),
+            // Right-click context menu on a sidebar chat
+            contextMenu: { open: false, x: 0, y: 0, conv: null },
 
             // Message tree
             messageTree: {},        // id → message
@@ -1138,6 +1307,7 @@
                 await this.loadMcpServers();
                 await this.loadModels();
                 await this.loadConversations();
+                await this.loadFolders();
                 // Auto-select most recent chat on startup; only create a new
                 // one if no chats exist yet. Avoids polluting history with
                 // empty "New Chat" stubs on every launch.
@@ -1156,6 +1326,15 @@
                     this.$nextTick(() => lucide.createIcons());
                 });
                 this.$watch('conversations', () => {
+                    this.$nextTick(() => lucide.createIcons());
+                });
+                this.$watch('folders', () => {
+                    this.$nextTick(() => lucide.createIcons());
+                });
+                this.$watch('expandedFolders', () => {
+                    this.$nextTick(() => lucide.createIcons());
+                });
+                this.$watch('contextMenu.open', () => {
                     this.$nextTick(() => lucide.createIcons());
                 });
                 // Cache hashes are per-model, so re-probe everything when
@@ -1361,17 +1540,17 @@
             },
 
             async _suggestModelForCurrentChat() {
-                // Prefer the conversation's stored model; fall back to the
-                // most recent message's model field. Returns '' if neither
-                // exists — caller handles the "no model anywhere" case.
+                // Prefer the most recent message's model on the *current
+                // branch* — that reflects what was actually used to generate
+                // what the user is looking at. Fall back to conv.model (set
+                // once at chat creation) only if no tagged messages exist.
                 if (!this.currentConversationId) return '';
-                const conv = this.conversations.find(c => c.id === this.currentConversationId);
-                if (conv && conv.model) return conv.model;
-                // Walk the active path backwards for the latest model tag.
                 for (let i = this.activePath.length - 1; i >= 0; i--) {
                     const m = this.activePath[i];
                     if (m.model) return m.model;
                 }
+                const conv = this.conversations.find(c => c.id === this.currentConversationId);
+                if (conv && conv.model) return conv.model;
                 return '';
             },
 
@@ -1679,15 +1858,19 @@
                 } catch (e) { console.error('Failed to delete conversation:', e); }
             },
 
-            async updateConversationTitle(title) {
-                if (!this.currentConversationId) return;
+            async updateConversationTitle(title, convId = null) {
+                // Defaults to the active conversation, but accepts an explicit
+                // id so we can rename other chats from the sidebar context
+                // menu without making them current first.
+                const targetId = convId || this.currentConversationId;
+                if (!targetId) return;
                 try {
-                    await fetch(`/api/conversations/${this.currentConversationId}`, {
+                    await fetch(`/api/conversations/${targetId}`, {
                         method: 'PATCH',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({ title }),
                     });
-                    const conv = this.conversations.find(c => c.id === this.currentConversationId);
+                    const conv = this.conversations.find(c => c.id === targetId);
                     if (conv) conv.title = title;
                 } catch (e) { /* ignore */ }
             },
@@ -1828,6 +2011,12 @@
                 return html;
             },
 
+            _isHiddenMessage(msg) {
+                // Tool responses and assistant turns that only called tools
+                // live in the DB for cache replay but shouldn't clutter the UI.
+                return msg.role === 'tool' || (msg.role === 'assistant' && msg.tool_calls);
+            },
+
             _renderTreeChain(msgId, activeIds) {
                 let html = '';
                 let currentId = msgId;
@@ -1837,7 +2026,9 @@
                     if (!msg) break;
 
                     const children = this.childrenMap[currentId] || [];
-                    html += this._renderTreeNodeHtml(msg, children.length, activeIds);
+                    if (!this._isHiddenMessage(msg)) {
+                        html += this._renderTreeNodeHtml(msg, children.length, activeIds);
+                    }
 
                     if (children.length === 0) {
                         break;
@@ -2440,9 +2631,154 @@
             renameConversation(conv) {
                 const newTitle = prompt('Rename conversation:', conv.title || 'New Chat');
                 if (newTitle !== null && newTitle.trim()) {
-                    this.updateConversationTitle(newTitle.trim());
+                    this.updateConversationTitle(newTitle.trim(), conv.id);
                     conv.title = newTitle.trim();
                 }
+            },
+
+            // === Folders ===
+
+            async loadFolders() {
+                try {
+                    const resp = await fetch('/api/folders');
+                    if (resp.ok) this.folders = await resp.json();
+                } catch (e) { console.error('Failed to load folders:', e); }
+            },
+
+            convsInFolder(folderId) {
+                return this.conversations.filter(c => c.folder_id === folderId);
+            },
+
+            get unfiledConversations() {
+                return this.conversations.filter(c => !c.folder_id);
+            },
+
+            toggleFolder(folderId) {
+                this.expandedFolders[folderId] = !this.expandedFolders[folderId];
+                try {
+                    localStorage.setItem(
+                        'canopy-expanded-folders',
+                        JSON.stringify(this.expandedFolders),
+                    );
+                } catch { /* ignore quota errors */ }
+                this.$nextTick(() => lucide.createIcons());
+            },
+
+            async createFolder() {
+                const name = prompt('New folder name:');
+                if (!name || !name.trim()) return null;
+                try {
+                    const resp = await fetch('/api/folders', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ name: name.trim() }),
+                    });
+                    if (!resp.ok) return null;
+                    const folder = await resp.json();
+                    this.folders.push(folder);
+                    this.folders.sort((a, b) =>
+                        a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }));
+                    this.expandedFolders[folder.id] = true;
+                    this.$nextTick(() => lucide.createIcons());
+                    return folder;
+                } catch (e) {
+                    console.error('Failed to create folder:', e);
+                    return null;
+                }
+            },
+
+            async renameFolder(folder) {
+                const name = prompt('Rename folder:', folder.name);
+                if (!name || !name.trim() || name.trim() === folder.name) return;
+                try {
+                    const resp = await fetch(`/api/folders/${folder.id}`, {
+                        method: 'PATCH',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ name: name.trim() }),
+                    });
+                    if (resp.ok) {
+                        folder.name = name.trim();
+                        this.folders.sort((a, b) =>
+                            a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }));
+                    }
+                } catch (e) { console.error('Failed to rename folder:', e); }
+            },
+
+            async deleteFolderPrompt(folder) {
+                const count = this.convsInFolder(folder.id).length;
+                const msg = count > 0
+                    ? `Delete folder "${folder.name}"? Its ${count} chat(s) will move to the top of the list.`
+                    : `Delete folder "${folder.name}"?`;
+                if (!confirm(msg)) return;
+                try {
+                    const resp = await fetch(`/api/folders/${folder.id}`, { method: 'DELETE' });
+                    if (resp.ok) {
+                        this.folders = this.folders.filter(f => f.id !== folder.id);
+                        // ON DELETE SET NULL detached the chats server-side;
+                        // mirror that locally so they appear in the unfiled
+                        // list without a full reload.
+                        for (const c of this.conversations) {
+                            if (c.folder_id === folder.id) c.folder_id = null;
+                        }
+                        delete this.expandedFolders[folder.id];
+                    }
+                } catch (e) { console.error('Failed to delete folder:', e); }
+            },
+
+            async moveConversationToFolder(conv, folderId) {
+                try {
+                    const resp = await fetch(`/api/conversations/${conv.id}`, {
+                        method: 'PATCH',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ folder_id: folderId }),
+                    });
+                    if (resp.ok) {
+                        conv.folder_id = folderId;
+                        if (folderId) this.expandedFolders[folderId] = true;
+                    }
+                } catch (e) { console.error('Failed to move conversation:', e); }
+            },
+
+            // === Sidebar context menu ===
+
+            openConvContextMenu(event, conv) {
+                // Clamp to viewport so the menu doesn't render off-screen
+                // when the user right-clicks near the bottom-right edge.
+                const menuW = 220, menuH = 320;
+                const x = Math.min(event.clientX, window.innerWidth - menuW);
+                const y = Math.min(event.clientY, window.innerHeight - menuH);
+                this.contextMenu = { open: true, x, y, conv };
+                this.$nextTick(() => lucide.createIcons());
+            },
+
+            closeContextMenu() {
+                if (this.contextMenu.open) this.contextMenu.open = false;
+            },
+
+            ctxRename() {
+                const conv = this.contextMenu.conv;
+                this.closeContextMenu();
+                if (conv) this.renameConversation(conv);
+            },
+
+            ctxDelete() {
+                const conv = this.contextMenu.conv;
+                this.closeContextMenu();
+                if (conv) this.deleteConversation(conv.id);
+            },
+
+            ctxMove(folderId) {
+                const conv = this.contextMenu.conv;
+                this.closeContextMenu();
+                if (conv) this.moveConversationToFolder(conv, folderId);
+            },
+
+            async ctxNewFolderAndMove() {
+                const conv = this.contextMenu.conv;
+                this.closeContextMenu();
+                if (!conv) return;
+                const folder = await this.createFolder();
+                if (folder) await this.moveConversationToFolder(conv, folder.id);
             },
 
             // === Copy ===

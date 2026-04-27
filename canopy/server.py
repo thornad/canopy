@@ -18,6 +18,8 @@ from .models import (
     ChatRequest,
     ConversationCreate,
     ConversationUpdate,
+    FolderCreate,
+    FolderUpdate,
     MCPServerCreate,
     MCPServerUpdate,
     MessageCreate,
@@ -222,7 +224,13 @@ async def get_conversation(conv_id: str):
 
 @app.patch("/api/conversations/{conv_id}")
 async def update_conversation(conv_id: str, body: ConversationUpdate):
-    updates = body.model_dump(exclude_none=True)
+    # folder_id uses a sentinel default so that an explicit null (= unfile)
+    # is preserved through model_dump while an omitted field is dropped.
+    raw = body.model_dump()
+    folder_change = raw.pop("folder_id")
+    updates = {k: v for k, v in raw.items() if v is not None}
+    if folder_change != "__unset__":
+        updates["folder_id"] = folder_change
     if not updates:
         raise HTTPException(400, "No fields to update")
     ok = await db.update_conversation(conv_id, **updates)
@@ -236,6 +244,41 @@ async def delete_conversation(conv_id: str):
     ok = await db.delete_conversation(conv_id)
     if not ok:
         raise HTTPException(404, "Conversation not found")
+    return {"deleted": True}
+
+
+# --- Folders ---
+
+
+@app.get("/api/folders")
+async def list_folders():
+    return await db.list_folders()
+
+
+@app.post("/api/folders", status_code=201)
+async def create_folder(body: FolderCreate):
+    name = body.name.strip()
+    if not name:
+        raise HTTPException(400, "Folder name required")
+    return await db.create_folder(name=name)
+
+
+@app.patch("/api/folders/{folder_id}")
+async def update_folder(folder_id: str, body: FolderUpdate):
+    name = body.name.strip()
+    if not name:
+        raise HTTPException(400, "Folder name required")
+    ok = await db.update_folder(folder_id, name=name)
+    if not ok:
+        raise HTTPException(404, "Folder not found")
+    return {"id": folder_id, "name": name}
+
+
+@app.delete("/api/folders/{folder_id}")
+async def delete_folder(folder_id: str):
+    ok = await db.delete_folder(folder_id)
+    if not ok:
+        raise HTTPException(404, "Folder not found")
     return {"deleted": True}
 
 

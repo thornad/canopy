@@ -12,24 +12,37 @@ _DB_PATH: Optional[Path] = None
 _db: Optional[aiosqlite.Connection] = None
 
 SCHEMA = """
+CREATE TABLE IF NOT EXISTS folders (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    created_at REAL,
+    updated_at REAL
+);
+
 CREATE TABLE IF NOT EXISTS conversations (
     id TEXT PRIMARY KEY,
     title TEXT,
     system_prompt TEXT DEFAULT '',
     model TEXT DEFAULT '',
+    folder_id TEXT REFERENCES folders(id) ON DELETE SET NULL,
     created_at REAL,
     updated_at REAL
 );
+-- Note: idx_conversations_folder is created in init_db() *after* the
+-- folder_id migration runs, so legacy DBs (which lack the column when
+-- this script executes) don't trip CREATE INDEX on a missing column.
 
 CREATE TABLE IF NOT EXISTS messages (
     id TEXT PRIMARY KEY,
     conversation_id TEXT REFERENCES conversations(id) ON DELETE CASCADE,
     parent_id TEXT REFERENCES messages(id),
-    role TEXT CHECK(role IN ('system', 'user', 'assistant')),
+    role TEXT CHECK(role IN ('system', 'user', 'assistant', 'tool')),
     content TEXT,
     model TEXT,
     token_count INTEGER DEFAULT 0,
     cache_hit INTEGER DEFAULT 0,
+    tool_calls TEXT,
+    tool_call_id TEXT,
     created_at REAL
 );
 
@@ -90,6 +103,59 @@ async def init_db(db_path: Optional[Path] = None):
     await _db.execute("PRAGMA foreign_keys=ON")
     await _db.executescript(SCHEMA)
 
+    # Migrate pre-existing DBs: older schema restricted role to the three base
+    # roles and had no tool_calls/tool_call_id columns. Rebuild the table if
+    # the new columns are missing so we can persist MCP tool turns alongside
+    # normal messages. Safe to run on every start — it's a no-op after the
+    # first migration.
+    cursor = await _db.execute("PRAGMA table_info(messages)")
+    cols = {row["name"] for row in await cursor.fetchall()}
+    if "tool_calls" not in cols:
+        await _db.executescript(
+            """
+            ALTER TABLE messages RENAME TO _messages_old;
+            CREATE TABLE messages (
+                id TEXT PRIMARY KEY,
+                conversation_id TEXT REFERENCES conversations(id) ON DELETE CASCADE,
+                parent_id TEXT REFERENCES messages(id),
+                role TEXT CHECK(role IN ('system', 'user', 'assistant', 'tool')),
+                content TEXT,
+                model TEXT,
+                token_count INTEGER DEFAULT 0,
+                cache_hit INTEGER DEFAULT 0,
+                tool_calls TEXT,
+                tool_call_id TEXT,
+                created_at REAL
+            );
+            INSERT INTO messages
+                (id, conversation_id, parent_id, role, content, model, token_count, cache_hit, created_at)
+            SELECT
+                id, conversation_id, parent_id, role, content, model, token_count, cache_hit, created_at
+            FROM _messages_old;
+            DROP TABLE _messages_old;
+            CREATE INDEX IF NOT EXISTS idx_messages_conversation ON messages(conversation_id);
+            CREATE INDEX IF NOT EXISTS idx_messages_parent ON messages(parent_id);
+            """
+        )
+
+    # Migrate pre-existing DBs that lack the conversations.folder_id column.
+    # SQLite supports adding nullable columns in-place, so a simple ALTER is
+    # safe and runs only once (the PRAGMA check makes it a no-op afterwards).
+    cursor = await _db.execute("PRAGMA table_info(conversations)")
+    conv_cols = {row["name"] for row in await cursor.fetchall()}
+    if "folder_id" not in conv_cols:
+        await _db.execute(
+            "ALTER TABLE conversations ADD COLUMN folder_id TEXT "
+            "REFERENCES folders(id) ON DELETE SET NULL"
+        )
+    # Index lives here (not in SCHEMA) so legacy DBs that get the column
+    # added via the ALTER above still get the index — without erroring on
+    # the executescript path before the column existed.
+    await _db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_conversations_folder "
+        "ON conversations(folder_id)"
+    )
+
     # Seed default settings
     for key, value in DEFAULT_SETTINGS.items():
         await _db.execute(
@@ -138,7 +204,7 @@ async def update_settings(updates: dict):
 async def list_conversations() -> list[dict]:
     db = _get_db()
     cursor = await db.execute(
-        "SELECT id, title, model, created_at, updated_at "
+        "SELECT id, title, model, folder_id, created_at, updated_at "
         "FROM conversations ORDER BY updated_at DESC"
     )
     rows = await cursor.fetchall()
@@ -201,8 +267,13 @@ async def get_conversation(conv_id: str) -> Optional[dict]:
 
 async def update_conversation(conv_id: str, **kwargs) -> bool:
     db = _get_db()
-    allowed = {"title", "system_prompt", "model"}
-    updates = {k: v for k, v in kwargs.items() if k in allowed}
+    allowed = {"title", "system_prompt", "model", "folder_id"}
+    # folder_id is the only field where None is meaningful (= unfile from
+    # folder), so allow it through; other fields treat None as "no change".
+    updates = {
+        k: v for k, v in kwargs.items()
+        if k in allowed and (v is not None or k == "folder_id")
+    }
     if not updates:
         return False
     updates["updated_at"] = time.time()
@@ -224,6 +295,50 @@ async def delete_conversation(conv_id: str) -> bool:
     return cursor.rowcount > 0
 
 
+# --- Folders ---
+
+
+async def list_folders() -> list[dict]:
+    db = _get_db()
+    cursor = await db.execute(
+        "SELECT id, name, created_at, updated_at "
+        "FROM folders ORDER BY name COLLATE NOCASE"
+    )
+    rows = await cursor.fetchall()
+    return [dict(row) for row in rows]
+
+
+async def create_folder(name: str) -> dict:
+    db = _get_db()
+    folder_id = _new_id()
+    now = time.time()
+    await db.execute(
+        "INSERT INTO folders (id, name, created_at, updated_at) VALUES (?, ?, ?, ?)",
+        (folder_id, name, now, now),
+    )
+    await db.commit()
+    return {"id": folder_id, "name": name, "created_at": now, "updated_at": now}
+
+
+async def update_folder(folder_id: str, name: str) -> bool:
+    db = _get_db()
+    cursor = await db.execute(
+        "UPDATE folders SET name = ?, updated_at = ? WHERE id = ?",
+        (name, time.time(), folder_id),
+    )
+    await db.commit()
+    return cursor.rowcount > 0
+
+
+async def delete_folder(folder_id: str) -> bool:
+    # ON DELETE SET NULL on conversations.folder_id detaches the chats; the
+    # chats themselves stay intact in the unfiled top-level list.
+    db = _get_db()
+    cursor = await db.execute("DELETE FROM folders WHERE id = ?", (folder_id,))
+    await db.commit()
+    return cursor.rowcount > 0
+
+
 # --- Messages ---
 
 
@@ -235,15 +350,22 @@ async def add_message(
     model: str = "",
     token_count: int = 0,
     cache_hit: bool = False,
+    tool_calls: Optional[list] = None,
+    tool_call_id: Optional[str] = None,
 ) -> dict:
     db = _get_db()
     msg_id = _new_id()
     now = time.time()
+    tc_json = json.dumps(tool_calls) if tool_calls else None
     await db.execute(
         "INSERT INTO messages "
-        "(id, conversation_id, parent_id, role, content, model, token_count, cache_hit, created_at) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        (msg_id, conversation_id, parent_id, role, content, model, token_count, int(cache_hit), now),
+        "(id, conversation_id, parent_id, role, content, model, token_count, cache_hit, "
+        "tool_calls, tool_call_id, created_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            msg_id, conversation_id, parent_id, role, content, model,
+            token_count, int(cache_hit), tc_json, tool_call_id, now,
+        ),
     )
     # Touch conversation updated_at
     await db.execute(
@@ -260,6 +382,8 @@ async def add_message(
         "model": model,
         "token_count": token_count,
         "cache_hit": cache_hit,
+        "tool_calls": tc_json,
+        "tool_call_id": tool_call_id,
         "created_at": now,
     }
 
