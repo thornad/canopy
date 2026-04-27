@@ -269,6 +269,43 @@ async def delete_message(msg_id: str):
 # --- SSE Proxy to oMLX ---
 
 
+def _path_to_openai_messages(path: list[dict]) -> list[dict]:
+    """Rebuild an OpenAI-style messages array from a DB path.
+
+    Handles tool rows (``role='tool'``) and assistant rows that carry
+    ``tool_calls`` so probes and chat requests replay the exact sequence
+    oMLX saw originally — otherwise the cache hashes diverge after any
+    tool-calling turn.
+    """
+    out: list[dict] = []
+    for msg in path:
+        role = msg.get("role") or "user"
+        content = msg.get("content", "")
+        if isinstance(content, str):
+            try:
+                parsed = json.loads(content)
+                if isinstance(parsed, list):
+                    content = parsed
+            except (json.JSONDecodeError, TypeError):
+                pass
+        if role == "tool":
+            out.append({
+                "role": "tool",
+                "tool_call_id": msg.get("tool_call_id") or "",
+                "content": content,
+            })
+            continue
+        entry: dict = {"role": role, "content": content}
+        raw_tc = msg.get("tool_calls")
+        if raw_tc:
+            try:
+                entry["tool_calls"] = json.loads(raw_tc) if isinstance(raw_tc, str) else raw_tc
+            except json.JSONDecodeError:
+                pass
+        out.append(entry)
+    return out
+
+
 MCP_MAX_TURNS = 10
 
 
@@ -291,6 +328,9 @@ async def _generate_with_tools(
     accumulated_reasoning = ""
     final_content = ""
     usage_total: dict = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+    # Walk the parent chain as we save each intermediate turn so a future
+    # probe / next send replays the exact sequence oMLX just cached.
+    current_parent = body.parent_id
 
     def _merge_usage(u: dict) -> None:
         for k in ("prompt_tokens", "completion_tokens", "total_tokens"):
@@ -383,6 +423,21 @@ async def _generate_with_tools(
                             "tool_calls": tool_calls_list,
                         }
                     )
+                    # Persist the assistant turn so the prompt path replays the
+                    # same token sequence oMLX just cached. We deliberately
+                    # strip any reasoning_content from the saved content — the
+                    # next turn sends only the visible text + tool_calls,
+                    # which is what oMLX's cache was keyed on.
+                    assistant_msg = await db.add_message(
+                        conversation_id=body.conversation_id,
+                        role="assistant",
+                        content=turn_content,
+                        parent_id=current_parent,
+                        model=body.model,
+                        tool_calls=tool_calls_list,
+                    )
+                    current_parent = assistant_msg["id"]
+
                     for tc in tool_calls_list:
                         fn = tc.get("function") or {}
                         name = fn.get("name", "")
@@ -405,6 +460,14 @@ async def _generate_with_tools(
                                 "content": result,
                             }
                         )
+                        tool_msg = await db.add_message(
+                            conversation_id=body.conversation_id,
+                            role="tool",
+                            content=result,
+                            parent_id=current_parent,
+                            tool_call_id=tc.get("id", ""),
+                        )
+                        current_parent = tool_msg["id"]
                         yield f"data: {json.dumps({'type': 'tool_result', 'name': name, 'content': result})}\n\n"
                     continue
 
@@ -433,7 +496,7 @@ async def _generate_with_tools(
             conversation_id=body.conversation_id,
             role="assistant",
             content=full_content,
-            parent_id=body.parent_id,
+            parent_id=current_parent,
             model=body.model,
             token_count=len(full_content) // 4,
         )
@@ -462,17 +525,7 @@ async def chat_proxy(body: ChatRequest):
     messages = []
     if system_prompt:
         messages.append({"role": "system", "content": system_prompt})
-
-    for msg in path:
-        content = msg["content"]
-        # Try to parse JSON content (for multimodal)
-        try:
-            parsed = json.loads(content)
-            if isinstance(parsed, list):
-                content = parsed
-        except (json.JSONDecodeError, TypeError):
-            pass
-        messages.append({"role": msg["role"], "content": content})
+    messages.extend(_path_to_openai_messages(path))
 
     headers = {"Content-Type": "application/json"}
     if api_key:
@@ -694,21 +747,22 @@ async def _probe_leaf_cache(
     messages: list[dict] = []
     if system_prompt:
         messages.append({"role": "system", "content": system_prompt})
-    for msg in path:
-        content = msg["content"]
-        try:
-            parsed = json.loads(content)
-            if isinstance(parsed, list):
-                content = parsed
-        except (json.JSONDecodeError, TypeError):
-            pass
-        messages.append({"role": msg["role"], "content": content})
+    messages.extend(_path_to_openai_messages(path))
+
+    # oMLX v0.3.6+ includes ``tools`` in the chat-template hash, so a probe
+    # that omits them won't match the cache entries written by a real chat
+    # turn that *did* pass tools. Mirror what /api/chat sends so the dots
+    # reflect the actual prefill path.
+    probe_tools = mcp_registry.tool_specs() or None
 
     async def _send(c: httpx.AsyncClient, ck: httpx.Cookies) -> dict:
+        body: dict = {"model_id": model, "messages": messages}
+        if probe_tools:
+            body["tools"] = probe_tools
         resp = await c.post(
             f"{omlx_url}/admin/api/cache/probe",
             cookies=ck,
-            json={"model_id": model, "messages": messages},
+            json=body,
         )
         if resp.status_code != 200:
             return {"status": "error", "detail": resp.text, "leaf_id": leaf_id}
