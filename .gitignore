@@ -7,11 +7,6 @@ build/
 *.db
 *.log
 .DS_Store
-canopy/static/js/*.min.js
-canopy/static/css/tailwind.css
-canopy/static/css/katex.min.css
-canopy/static/css/hljs-*.min.css
-canopy/static/fonts/
 canopy/tailwindcss-*
 packaging/_build/
 packaging/_export/
