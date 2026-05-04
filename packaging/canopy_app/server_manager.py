@@ -255,16 +255,32 @@ class ServerManager:
                 break
             time.sleep(0.5)
         else:
-            # Server didn't start in time
+            # Startup probe didn't see /api/health in 15s. Two cases:
+            #  - Process exited → real failure, surface ERROR.
+            #  - Process is still alive → likely a slow lifespan (e.g.
+            #    a hanging MCP server taking longer than 15s to time
+            #    out). Fall through to the monitor loop instead of
+            #    giving up — it will promote to RUNNING the moment a
+            #    health check succeeds.
             if self._process and self._process.poll() is not None:
                 logger.error("Server process exited during startup")
                 self._update_status(ServerStatus.ERROR)
-            return
+                return
+            logger.info(
+                "Startup health probe timed out but process is still "
+                "alive — switching to ongoing monitoring"
+            )
 
         # Monitor health
         fail_count = 0
+        first_iter = True
         while not self._stop_event.is_set():
-            time.sleep(5)
+            # Check immediately on first entry (so we don't add another
+            # 5s of "Starting" if we just fell through from the slow
+            # startup case), then settle into the 5s cadence.
+            if not first_iter:
+                time.sleep(5)
+            first_iter = False
             if self._stop_event.is_set():
                 return
 
