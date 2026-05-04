@@ -593,3 +593,47 @@ async def delete_mcp_server(server_id: str) -> bool:
     )
     await db.commit()
     return cursor.rowcount > 0
+
+
+async def sync_mcp_from_json(path: Path) -> dict:
+    """Mirror an LM Studio / Claude Desktop style mcp.json into the mcp_servers table.
+
+    JSON is authoritative: servers in the file are inserted/updated; servers in
+    the DB whose name is not in the file are deleted. Returns counts.
+    """
+    data = json.loads(path.read_text())
+    spec = (data.get("mcpServers") or data.get("servers") or {})
+    existing = {s["name"]: s for s in await list_mcp_servers()}
+    desired: set[str] = set()
+    added = updated = removed = 0
+
+    for name, conf in spec.items():
+        if not isinstance(conf, dict):
+            continue
+        command = conf.get("command")
+        if not command:
+            continue
+        desired.add(name)
+        args = list(conf.get("args") or [])
+        env = dict(conf.get("env") or {})
+        enabled = bool(conf.get("enabled", True))
+        if conf.get("disabled") is True:
+            enabled = False
+
+        cur = existing.get(name)
+        if cur is None:
+            await add_mcp_server(name=name, command=command, args=args, env=env, enabled=enabled)
+            added += 1
+        elif (cur["command"] != command or cur["args"] != args
+              or cur["env"] != env or cur["enabled"] != enabled):
+            await update_mcp_server(
+                cur["id"], command=command, args=args, env=env, enabled=enabled,
+            )
+            updated += 1
+
+    for name, cur in existing.items():
+        if name not in desired:
+            await delete_mcp_server(cur["id"])
+            removed += 1
+
+    return {"added": added, "updated": updated, "removed": removed}

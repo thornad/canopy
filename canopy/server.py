@@ -31,10 +31,19 @@ TEMPLATES_DIR = BASE_DIR / "templates"
 STATIC_DIR = BASE_DIR / "static"
 
 
+MCP_JSON_PATH = Path.home() / ".canopy" / "mcp.json"
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     db_path = getattr(app.state, "db_path", None)
     await db.init_db(db_path)
+    if MCP_JSON_PATH.exists():
+        try:
+            stats = await db.sync_mcp_from_json(MCP_JSON_PATH)
+            print(f"[mcp] loaded {MCP_JSON_PATH}: {stats}")
+        except Exception as e:
+            print(f"[mcp] failed to load {MCP_JSON_PATH}: {e}")
     try:
         await mcp_registry.sync(await db.list_mcp_servers())
     except Exception:

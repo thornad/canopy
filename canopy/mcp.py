@@ -49,6 +49,7 @@ class MCPClient:
         self.env = env or {}
         self._proc: Optional[asyncio.subprocess.Process] = None
         self._reader_task: Optional[asyncio.Task] = None
+        self._stderr_task: Optional[asyncio.Task] = None
         self._pending: dict[int, asyncio.Future] = {}
         self._next_id = 1
         self._tools: list[dict] = []
@@ -71,6 +72,7 @@ class MCPClient:
             env=merged_env,
         )
         self._reader_task = asyncio.create_task(self._read_loop())
+        self._stderr_task = asyncio.create_task(self._drain_stderr())
         try:
             await asyncio.wait_for(self._initialize(), timeout=INIT_TIMEOUT)
             await self._refresh_tools()
@@ -98,8 +100,11 @@ class MCPClient:
         finally:
             if self._reader_task:
                 self._reader_task.cancel()
+            if self._stderr_task:
+                self._stderr_task.cancel()
             self._proc = None
             self._reader_task = None
+            self._stderr_task = None
             for fut in self._pending.values():
                 if not fut.done():
                     fut.set_exception(MCPError(f"{self.name}: server stopped"))
@@ -148,6 +153,36 @@ class MCPClient:
                 if not fut.done():
                     fut.set_exception(MCPError(f"{self.name}: reader crashed: {e}"))
             self._pending.clear()
+
+    async def _drain_stderr(self) -> None:
+        """Drain the child's stderr to debug log.
+
+        Without this, a chatty MCP server (npm warnings, progress logs) will
+        eventually fill the stderr pipe buffer (~16-64 KB on macOS) and block
+        on its next write — including the JSON-RPC response on stdout — so
+        tool calls hang until REQUEST_TIMEOUT with no output.
+        """
+        assert self._proc and self._proc.stderr
+        buf = bytearray()
+        try:
+            while True:
+                chunk = await self._proc.stderr.read(65536)
+                if not chunk:
+                    break
+                buf.extend(chunk)
+                while True:
+                    nl = buf.find(b"\n")
+                    if nl < 0:
+                        break
+                    line = bytes(buf[:nl])
+                    del buf[: nl + 1]
+                    if line.strip():
+                        log.debug("%s [stderr]: %s", self.name,
+                                  line.decode("utf-8", errors="replace").rstrip())
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            log.debug("%s: stderr drain ended: %s", self.name, e)
 
     async def _send(self, method: str, params: Optional[dict] = None) -> Any:
         if not self.running:
