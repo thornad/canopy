@@ -34,6 +34,14 @@ tangible instead of abstract.
   glance what's stale.
 - **Document ingestion** — drop PDFs, DOCX, or markdown into a chat to
   add them to the context.
+- **Audio transcription** — drop an audio file (m4a, mp3, wav, flac, mp4,
+  mov, etc.); a small modal asks which ASR model to use (Whisper,
+  VibeVoice, …, populated from your oMLX `/v1/models`); the resulting
+  transcript becomes a regular text attachment that any chat model can
+  read. Streaming partials not implemented — the request blocks until
+  the transcript is ready (~30-60 s for a 10-min file on Apple Silicon).
+  Requires ffmpeg on the **oMLX** host for m4a/aac/webm/mp4 containers
+  (mp3/wav/flac/ogg work without it). On macOS: `brew install ffmpeg`.
 - **Folders & renaming** — group chats into folders from the sidebar.
   Right-click any chat for **Rename**, **Move to** *(folder list +
   "New folder…" + "Remove from folder")*, and **Delete**. Folder

@@ -392,6 +392,7 @@
         .loading-dot:nth-child(2) { animation-delay: 0.2s; }
         .loading-dot:nth-child(3) { animation-delay: 0.4s; }
         @keyframes pulse { 0%, 100% { opacity: 0.4; } 50% { opacity: 1; } }
+        @keyframes spin { to { transform: rotate(360deg); } }
 
         /* Thinking container */
         .thinking-container {
@@ -981,12 +982,24 @@
 
                     <!-- Document chips -->
                     <div x-show="pendingDocuments.length > 0" class="doc-chips" x-cloak>
-                        <template x-for="(doc, idx) in pendingDocuments" :key="doc.filename">
-                            <div class="doc-chip">
-                                <i data-lucide="file-text" style="width:12px;height:12px;"></i>
+                        <template x-for="(doc, idx) in pendingDocuments" :key="doc.filename + ':' + idx">
+                            <div class="doc-chip" :title="doc.source === 'transcription' ? ('transcript via ' + (doc.asr_model || 'ASR')) : ''">
+                                <template x-if="doc._transcribing">
+                                    <i data-lucide="loader-2" style="width:12px;height:12px;animation:spin 1s linear infinite;"></i>
+                                </template>
+                                <template x-if="!doc._transcribing && doc.source === 'transcription'">
+                                    <i data-lucide="mic" style="width:12px;height:12px;color:var(--accent);"></i>
+                                </template>
+                                <template x-if="!doc._transcribing && doc.source !== 'transcription'">
+                                    <i data-lucide="file-text" style="width:12px;height:12px;"></i>
+                                </template>
                                 <span x-text="doc.filename"></span>
-                                <span class="token-count" x-text="'~' + doc.token_estimate + ' tok'"></span>
-                                <button class="remove-doc" @click="pendingDocuments.splice(idx, 1)">
+                                <span class="token-count" x-show="doc._transcribing">transcribing…</span>
+                                <span class="token-count" x-show="!doc._transcribing && doc.source === 'transcription'"
+                                      x-text="'transcript · ~' + doc.token_estimate + ' tok'"></span>
+                                <span class="token-count" x-show="!doc._transcribing && doc.source !== 'transcription'"
+                                      x-text="'~' + doc.token_estimate + ' tok'"></span>
+                                <button class="remove-doc" x-show="!doc._transcribing" @click="pendingDocuments.splice(idx, 1)">
                                     <i data-lucide="x" style="width:10px;height:10px;"></i>
                                 </button>
                             </div>
@@ -994,7 +1007,7 @@
                     </div>
 
                     <input type="file" id="fileInput"
-                           accept=".md,.txt,.pdf,.docx,.doc"
+                           accept=".md,.txt,.pdf,.docx,.doc,.m4a,.mp3,.wav,.flac,.ogg,.opus,.webm,.aac,.mp4,.mov,audio/*"
                            x-ref="fileInput" @change="handleFileSelect($event)" class="hidden" style="display:none;">
 
                     <div class="input-row">
@@ -1165,6 +1178,41 @@
         </div>
     </div>
 
+    <!-- ASR (audio transcription) modal -->
+    <div x-show="asrModalOpen" x-cloak
+         @keydown.escape.window="cancelAsrModal()"
+         @keydown.enter.window="if (asrModalOpen && asrModel) confirmAsrTranscribe()"
+         style="position:fixed;inset:0;background:rgba(0,0,0,0.45);z-index:200;display:flex;align-items:center;justify-content:center;">
+        <div @click.stop
+             style="background:var(--bg-primary);border:1px solid var(--border-normal);border-radius:8px;padding:20px;max-width:440px;width:90%;box-shadow:0 10px 30px rgba(0,0,0,0.25);">
+            <div style="display:flex;align-items:center;gap:8px;font-size:14px;font-weight:600;margin-bottom:8px;">
+                <i data-lucide="mic" style="width:16px;height:16px;color:var(--accent);"></i>
+                <span>Transcribe audio</span>
+            </div>
+            <div style="font-size:12px;color:var(--text-secondary);margin-bottom:12px;">
+                File: <span x-text="asrPendingFile ? asrPendingFile.name : ''"
+                            style="font-family:ui-monospace,monospace;color:var(--text-primary);"></span>
+            </div>
+            <div x-show="asrError" x-cloak style="font-size:12px;color:var(--danger);margin-bottom:12px;" x-text="asrError"></div>
+            <div x-show="!asrError">
+                <div style="font-size:11px;color:var(--text-muted);margin-bottom:4px;">Transcription model</div>
+                <select class="setting-input" x-model="asrModel" style="width:100%;margin-bottom:12px;">
+                    <template x-for="m in asrModels" :key="m.id">
+                        <option :value="m.id" x-text="m.id"></option>
+                    </template>
+                </select>
+            </div>
+            <div style="display:flex;gap:8px;justify-content:flex-end;">
+                <button class="btn-secondary" style="padding:8px 14px;font-size:13px;" @click="cancelAsrModal()">Cancel</button>
+                <button class="btn-primary" style="padding:8px 14px;font-size:13px;"
+                        :disabled="!asrModel || !!asrError"
+                        @click="confirmAsrTranscribe()">
+                    Transcribe
+                </button>
+            </div>
+        </div>
+    </div>
+
     <!-- Sidebar context menu (right-click on a chat) -->
     <div class="ctx-menu" x-show="contextMenu.open" x-cloak
          @click.outside="closeContextMenu()"
@@ -1282,7 +1330,15 @@
 
             // Input
             inputText: '',
-            pendingDocuments: [],   // [{filename, content, token_estimate}]
+            pendingDocuments: [],   // [{filename, content, token_estimate, source?, asr_model?}]
+
+            // ASR (audio transcription) modal state
+            asrModalOpen: false,
+            asrPendingFile: null,        // File object awaiting confirmation
+            asrModels: [],               // [{id, ...}] from /api/asr-models
+            asrModelsLoaded: false,
+            asrModel: '',                // currently-selected model id in the modal
+            asrError: '',
 
             // Streaming
             isStreaming: false,
@@ -2563,6 +2619,11 @@
             },
 
             async parseAndAddDocument(file) {
+                if (this._isAudioFile(file)) {
+                    await this.openAsrModal(file);
+                    return;
+                }
+
                 const formData = new FormData();
                 formData.append('file', file);
 
@@ -2579,6 +2640,95 @@
                         this.$nextTick(() => lucide.createIcons());
                     }
                 } catch (e) { console.error('Document parse failed:', e); }
+            },
+
+            _isAudioFile(file) {
+                if (!file) return false;
+                if ((file.type || '').toLowerCase().startsWith('audio/')) return true;
+                const exts = ['.m4a','.mp3','.wav','.flac','.ogg','.opus','.webm','.aac','.mp4','.mov'];
+                const name = (file.name || '').toLowerCase();
+                return exts.some(e => name.endsWith(e));
+            },
+
+            async openAsrModal(file) {
+                this.asrPendingFile = file;
+                this.asrError = '';
+                if (!this.asrModelsLoaded) {
+                    try {
+                        const resp = await fetch('/api/asr-models');
+                        if (resp.ok) {
+                            const data = await resp.json();
+                            this.asrModels = data.data || [];
+                        }
+                    } catch (e) {
+                        console.error('Failed to load ASR models:', e);
+                    }
+                    this.asrModelsLoaded = true;
+                }
+                if (this.asrModels.length === 0) {
+                    this.asrError = 'No ASR models found on the oMLX server. Make sure a Whisper or VibeVoice model is installed.';
+                } else {
+                    const last = localStorage.getItem('canopy_last_asr_model');
+                    const ids = this.asrModels.map(m => m.id);
+                    this.asrModel = (last && ids.includes(last)) ? last : ids[0];
+                }
+                this.asrModalOpen = true;
+                this.$nextTick(() => lucide.createIcons());
+            },
+
+            cancelAsrModal() {
+                this.asrModalOpen = false;
+                this.asrPendingFile = null;
+                this.asrError = '';
+            },
+
+            async confirmAsrTranscribe() {
+                const file = this.asrPendingFile;
+                const model = this.asrModel;
+                if (!file || !model) return;
+                this.asrModalOpen = false;
+                this.asrPendingFile = null;
+                localStorage.setItem('canopy_last_asr_model', model);
+
+                // Add an in-flight placeholder so the user sees progress.
+                const placeholder = {
+                    filename: file.name,
+                    content: '',
+                    token_estimate: 0,
+                    source: 'transcription',
+                    asr_model: model,
+                    _transcribing: true,
+                };
+                this.pendingDocuments.push(placeholder);
+                this.$nextTick(() => lucide.createIcons());
+
+                const formData = new FormData();
+                formData.append('file', file);
+                let url = `/api/transcribe?model=${encodeURIComponent(model)}`;
+                if (this.currentConversationId) {
+                    url += `&conversation_id=${this.currentConversationId}`;
+                }
+
+                try {
+                    const resp = await fetch(url, { method: 'POST', body: formData });
+                    const idx = this.pendingDocuments.indexOf(placeholder);
+                    if (!resp.ok) {
+                        let msg = `Transcription failed (${resp.status})`;
+                        try { msg = (await resp.json()).detail || msg; } catch (_) {}
+                        if (idx >= 0) this.pendingDocuments.splice(idx, 1);
+                        alert(msg);
+                        return;
+                    }
+                    const doc = await resp.json();
+                    if (idx >= 0) this.pendingDocuments.splice(idx, 1, doc);
+                    else this.pendingDocuments.push(doc);
+                    this.$nextTick(() => lucide.createIcons());
+                } catch (e) {
+                    console.error('Transcription request failed:', e);
+                    const idx = this.pendingDocuments.indexOf(placeholder);
+                    if (idx >= 0) this.pendingDocuments.splice(idx, 1);
+                    alert('Transcription request failed: ' + e.message);
+                }
             },
 
             // === Export ===

@@ -970,6 +970,111 @@ async def parse_doc(file: UploadFile, conversation_id: Optional[str] = None):
     return result
 
 
+# --- Audio transcription (ASR) ---
+
+_ASR_NAME_HINTS = ("whisper", "vibevoice", "asr", "stt")
+
+
+@app.get("/api/asr-models")
+async def list_asr_models():
+    """Return the subset of oMLX models that look like ASR / STT engines.
+
+    oMLX's /v1/models response is OpenAI-shaped and doesn't reliably expose
+    a model_type, so we filter by id substring. Matches the names actually
+    on disk today (whisper-*, VibeVoice-ASR-*) and reasonable variants.
+    """
+    settings = await db.get_settings()
+    omlx_url = settings.get("omlx_url", "http://localhost:8000")
+    api_key = settings.get("omlx_api_key", "")
+    headers = {}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.get(f"{omlx_url}/v1/models", headers=headers)
+            data = resp.json()
+    except Exception as e:
+        raise HTTPException(502, f"Cannot reach oMLX: {e}")
+
+    models = data.get("data") if isinstance(data, dict) else None
+    if not isinstance(models, list):
+        return {"data": []}
+    filtered = [
+        m for m in models
+        if isinstance(m, dict)
+        and any(h in str(m.get("id", "")).lower() for h in _ASR_NAME_HINTS)
+    ]
+    return {"data": filtered}
+
+
+@app.post("/api/transcribe")
+async def transcribe_audio(
+    file: UploadFile,
+    model: str,
+    conversation_id: Optional[str] = None,
+):
+    """Forward an audio file to oMLX /v1/audio/transcriptions and persist
+    the resulting transcript as a Canopy document attachment.
+    """
+    settings = await db.get_settings()
+    omlx_url = settings.get("omlx_url", "http://localhost:8000")
+    api_key = settings.get("omlx_api_key", "")
+    headers = {}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+
+    filename = file.filename or "audio"
+    file_bytes = await file.read()
+    files = {"file": (filename, file_bytes, file.content_type or "application/octet-stream")}
+    form = {"model": model}
+
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(600.0, connect=10.0)) as client:
+            resp = await client.post(
+                f"{omlx_url}/v1/audio/transcriptions",
+                headers=headers,
+                files=files,
+                data=form,
+            )
+    except Exception as e:
+        raise HTTPException(502, f"Cannot reach oMLX: {e}")
+
+    if resp.status_code != 200:
+        try:
+            err = resp.json().get("error", {}).get("message") or resp.text
+        except Exception:
+            err = resp.text
+        raise HTTPException(resp.status_code, f"Transcription failed: {err}")
+
+    payload = resp.json()
+    text = payload.get("text") or ""
+    duration = payload.get("duration")
+    language = payload.get("language")
+
+    result: dict = {
+        "filename": filename,
+        "content": text,
+        "token_estimate": len(text) // 4,
+        "source": "transcription",
+        "asr_model": model,
+    }
+    if duration is not None:
+        result["duration"] = duration
+    if language:
+        result["language"] = language
+
+    if conversation_id:
+        doc = await db.add_document(
+            conversation_id=conversation_id,
+            filename=filename,
+            content=text,
+            token_estimate=result["token_estimate"],
+        )
+        result["id"] = doc["id"]
+
+    return result
+
+
 # --- Export ---
 
 
