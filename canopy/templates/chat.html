@@ -982,7 +982,7 @@
 
                     <!-- Document chips -->
                     <div x-show="pendingDocuments.length > 0" class="doc-chips" x-cloak>
-                        <template x-for="(doc, idx) in pendingDocuments" :key="doc.filename + ':' + idx">
+                        <template x-for="(doc, idx) in pendingDocuments" :key="doc.filename + ':' + idx + ':' + (doc._transcribing ? 'p' : (doc.source || 'doc'))">
                             <div class="doc-chip" :title="doc.source === 'transcription' ? ('transcript via ' + (doc.asr_model || 'ASR')) : ''">
                                 <template x-if="doc._transcribing">
                                     <i data-lucide="loader-2" style="width:12px;height:12px;animation:spin 1s linear infinite;"></i>
