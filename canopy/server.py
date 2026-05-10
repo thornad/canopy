@@ -1026,10 +1026,16 @@ async def transcribe_audio(
     filename = file.filename or "audio"
     file_bytes = await file.read()
     files = {"file": (filename, file_bytes, file.content_type or "application/octet-stream")}
-    form = {"model": model}
+    # Raise the per-call output cap from mlx-audio's default (e.g. VibeVoice
+    # caps at 8192 = ~24 min audio). oMLX silently ignores max_tokens when its
+    # build is older than the field. Models that don't respect max_tokens
+    # (whisper accepts **decode_options) treat it as a no-op.
+    form = {"model": model, "max_tokens": "65536"}
 
     try:
-        async with httpx.AsyncClient(timeout=httpx.Timeout(600.0, connect=10.0)) as client:
+        # 15 min total cap so very long files (multi-hour audio at slower
+        # ASR models) don't hit the default httpx 5s read timeout.
+        async with httpx.AsyncClient(timeout=httpx.Timeout(900.0, connect=10.0)) as client:
             resp = await client.post(
                 f"{omlx_url}/v1/audio/transcriptions",
                 headers=headers,
