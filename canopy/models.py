@@ -61,7 +61,7 @@ class MCPServerCreate(BaseModel):
     command: str
     args: str = ""  # shell-style string, parsed server-side
     env: str = ""   # KEY=VAL lines, parsed server-side
-    enabled: bool = True
+    enabled: bool = False
 
 
 class MCPServerUpdate(BaseModel):

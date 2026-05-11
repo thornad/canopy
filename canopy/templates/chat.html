@@ -322,9 +322,10 @@
             padding: 8px 16px; max-width: 600px; font-size: 14px;
             line-height: 1.6; position: relative;
         }
-        .user-msg-wrapper { position: relative; display: flex; align-items: center; gap: 4px; }
+        .user-msg-wrapper { position: relative; display: flex; flex-direction: column; align-items: flex-end; gap: 2px; }
         .user-action-btn {
             opacity: 0; transition: opacity 0.15s; flex-shrink: 0;
+            display: flex; flex-direction: row; gap: 4px;
         }
         .user-msg-wrapper:hover .user-action-btn { opacity: 1; }
 
@@ -833,7 +834,8 @@
                                         <template x-if="editingMessageId !== msg.id">
                                             <div class="user-bubble" x-html="renderMarkdown(msg.content)"></div>
                                         </template>
-                                        <div class="user-action-btn" style="display:flex;flex-direction:column;gap:2px;">
+                                        <div class="user-action-btn"
+                                             x-show="editingMessageId !== msg.id">
                                             <button class="icon-btn" @click="startEdit(msg)"
                                                     title="Edit (creates branch)">
                                                 <i data-lucide="pencil" style="width:14px;height:14px;"></i>
@@ -872,7 +874,7 @@
                                             <span x-text="msg.model || currentModel || 'Assistant'"></span>
                                         </div>
                                         <div class="msg-actions">
-                                            <button class="icon-btn" @click="copyMessage(msg.content)" title="Copy">
+                                            <button class="icon-btn" @click="copyMessage((msg.content || '').replace(/<think>[\s\S]*?<\/think[^>]*>/g, '').trim())" title="Copy">
                                                 <i data-lucide="copy" style="width:14px;height:14px;"></i>
                                             </button>
                                             <button class="icon-btn" @click="saveMessageToFile(msg)" title="Save to file">
@@ -907,6 +909,7 @@
                                         </span>
                                         <span style="flex:1;"></span>
                                         <button @click="branchFromMessage(msg)"
+                                                x-show="idx < activePath.length - 1"
                                                 :disabled="isStreaming"
                                                 style="background:none;border:none;cursor:pointer;color:var(--text-muted);display:flex;align-items:center;gap:3px;font-size:11px;padding:2px 6px;border-radius:4px;transition:all 0.1s;"
                                                 onmouseover="this.style.color='var(--accent)';this.style.background='var(--bg-tertiary)'"
@@ -1475,7 +1478,7 @@
                     ? '/api/mcp/servers/' + this.mcpEditingId
                     : '/api/mcp/servers';
                 const method = this.mcpEditingId ? 'PATCH' : 'POST';
-                if (!this.mcpEditingId) payload.enabled = true;
+                if (!this.mcpEditingId) payload.enabled = false;
                 try {
                     const resp = await fetch(url, {
                         method,

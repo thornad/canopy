@@ -71,7 +71,7 @@ CREATE TABLE IF NOT EXISTS mcp_servers (
     command TEXT NOT NULL,
     args TEXT NOT NULL DEFAULT '[]',
     env TEXT NOT NULL DEFAULT '{}',
-    enabled INTEGER NOT NULL DEFAULT 1,
+    enabled INTEGER NOT NULL DEFAULT 0,
     created_at REAL
 );
 """
@@ -616,7 +616,7 @@ async def sync_mcp_from_json(path: Path) -> dict:
         desired.add(name)
         args = list(conf.get("args") or [])
         env = dict(conf.get("env") or {})
-        enabled = bool(conf.get("enabled", True))
+        enabled = bool(conf.get("enabled", False))
         if conf.get("disabled") is True:
             enabled = False
 
