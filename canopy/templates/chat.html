@@ -1303,6 +1303,9 @@
                 try { return JSON.parse(localStorage.getItem('canopy-expanded-folders') || '{}'); }
                 catch { return {}; }
             })(),
+            // The folder the user is "in" — updated when they expand a folder
+            // or open a chat inside one. New Chat lands here automatically.
+            lastFolderContext: null,
             // Right-click context menu on a sidebar chat
             contextMenu: { open: false, x: 0, y: 0, conv: null },
 
@@ -1860,6 +1863,14 @@
                         return;
                     }
                 }
+                // Inherit folder from whichever folder the user is currently
+                // "in" — either a chat they're viewing or a folder they
+                // expanded. Falls back to no folder.
+                const currentConv = this.conversations.find(
+                    c => c.id === this.currentConversationId);
+                const targetFolderId = this.lastFolderContext
+                    || currentConv?.folder_id
+                    || null;
                 try {
                     const resp = await fetch('/api/conversations', {
                         method: 'POST',
@@ -1868,12 +1879,20 @@
                     });
                     if (resp.ok) {
                         const conv = await resp.json();
+                        // Set folder_id locally BEFORE unshift so the sidebar
+                        // renders the conv in the folder immediately. The
+                        // PATCH below just persists this on the server.
+                        if (targetFolderId) conv.folder_id = targetFolderId;
                         this.conversations.unshift(conv);
                         this.currentConversationId = conv.id;
                         this.messageTree = {};
                         this.childrenMap = {};
                         this.activePath = [];
                         this.pendingDocuments = [];
+                        if (targetFolderId) {
+                            this.expandedFolders[targetFolderId] = true;
+                            await this.moveConversationToFolder(conv, targetFolderId);
+                        }
                     }
                 } catch (e) { console.error('Failed to create conversation:', e); }
                 this.sidebarOpen = window.innerWidth >= 768;
@@ -1885,6 +1904,8 @@
                     if (!resp.ok) return;
                     const conv = await resp.json();
                     this.currentConversationId = id;
+                    // Track which folder we're "in" so the next New Chat lands here.
+                    this.lastFolderContext = conv.folder_id || null;
                     // Deliberately do NOT override currentModel here. The
                     // user picks the model explicitly; at send time, if
                     // it's still blank, sendMessage() confirms loading the
@@ -2808,6 +2829,11 @@
 
             toggleFolder(folderId) {
                 this.expandedFolders[folderId] = !this.expandedFolders[folderId];
+                if (this.expandedFolders[folderId]) {
+                    this.lastFolderContext = folderId;
+                } else if (this.lastFolderContext === folderId) {
+                    this.lastFolderContext = null;
+                }
                 try {
                     localStorage.setItem(
                         'canopy-expanded-folders',
