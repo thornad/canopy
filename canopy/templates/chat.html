@@ -1101,10 +1101,9 @@
                                 <div style="font-size:11px;color:var(--text-muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;"
                                      x-text="s.command + (s.args ? ' ' + s.args : '')"></div>
                             </div>
-                            <label style="display:flex;align-items:center;gap:4px;font-size:11px;cursor:pointer;">
+                            <label style="display:flex;align-items:center;cursor:pointer;">
                                 <input type="checkbox" :checked="s.enabled"
                                        @change="toggleMcpServer(s)">
-                                <span x-text="s.enabled ? 'on' : 'off'"></span>
                             </label>
                         </div>
                         <div style="display:flex;gap:6px;margin-top:6px;font-size:11px;align-items:center;">
@@ -1175,6 +1174,32 @@
                 <button class="btn-secondary"
                         style="padding:8px 14px;font-size:13px;margin-top:4px;"
                         @click="_resolveModelChoice('cancel')">
+                    Cancel
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Loaded-in-RAM model picker (no model selected for a new chat) -->
+    <div x-show="loadedModelOpen" x-cloak
+         @keydown.escape.window="_resolveLoadedModelChoice('cancel')"
+         style="position:fixed;inset:0;background:rgba(0,0,0,0.45);z-index:200;display:flex;align-items:center;justify-content:center;">
+        <div @click.stop
+             style="background:var(--bg-primary);border:1px solid var(--border-normal);border-radius:8px;padding:20px;max-width:480px;width:90%;box-shadow:0 10px 30px rgba(0,0,0,0.25);">
+            <div style="font-size:14px;font-weight:600;margin-bottom:8px;">Pick a model</div>
+            <div style="font-size:12px;color:var(--text-secondary);margin-bottom:16px;">
+                These models are currently loaded in oMLX RAM — they will respond without a cold load.
+            </div>
+            <div style="display:flex;flex-direction:column;gap:8px;max-height:50vh;overflow:auto;">
+                <template x-for="m in loadedModelChoices" :key="m">
+                    <button class="btn-primary"
+                            style="padding:10px 14px;font-size:13px;text-align:left;font-family:ui-monospace,monospace;"
+                            @click="_resolveLoadedModelChoice(m)"
+                            x-text="m"></button>
+                </template>
+                <button class="btn-secondary"
+                        style="padding:8px 14px;font-size:13px;margin-top:4px;"
+                        @click="_resolveLoadedModelChoice('cancel')">
                     Cancel
                 </button>
             </div>
@@ -1291,6 +1316,10 @@
             modelMismatchOpen: false,
             modelMismatchHistorical: '',
             modelMismatchCurrent: '',
+            // Modal for picking from oMLX's RAM-resident models when no model
+            // is selected and the chat has no historical model hint.
+            loadedModelOpen: false,
+            loadedModelChoices: [],
             _modelMismatchResolve: null,
 
             // Conversations
@@ -1598,6 +1627,33 @@
                 this.modelMismatchOpen = false;
                 const r = this._modelMismatchResolve;
                 this._modelMismatchResolve = null;
+                if (r) r(choice);
+            },
+
+            async _fetchLoadedModels() {
+                try {
+                    const resp = await fetch('/api/models/status');
+                    if (!resp.ok) return [];
+                    const data = await resp.json();
+                    return (data.models || [])
+                        .filter(m => m.loaded)
+                        .map(m => m.id);
+                } catch { return []; }
+            },
+
+            _promptLoadedModelChoice(models) {
+                // Returns a Promise that resolves to a model id or 'cancel'.
+                this.loadedModelChoices = models;
+                this.loadedModelOpen = true;
+                return new Promise((resolve) => {
+                    this._loadedModelResolve = resolve;
+                });
+            },
+
+            _resolveLoadedModelChoice(choice) {
+                this.loadedModelOpen = false;
+                const r = this._loadedModelResolve;
+                this._loadedModelResolve = null;
                 if (r) r(choice);
             },
 
@@ -2235,15 +2291,25 @@
                 if (!this.currentModel) {
                     const suggested = await this._suggestModelForCurrentChat();
                     if (!suggested) {
-                        alert('Please select a model before sending.');
-                        return;
+                        // New chat with no model hint — offer whatever's
+                        // already in oMLX RAM so the user doesn't pay a cold
+                        // load just to get going.
+                        const loaded = await this._fetchLoadedModels();
+                        if (loaded.length === 0) {
+                            alert('No model is loaded in oMLX. Pick one from the model menu.');
+                            return;
+                        }
+                        const chosen = await this._promptLoadedModelChoice(loaded);
+                        if (!chosen || chosen === 'cancel') return;
+                        this.currentModel = chosen;
+                    } else {
+                        const ok = confirm(
+                            `No model is selected.\n\nLoad "${suggested}" ` +
+                            `(last used in this chat)?`
+                        );
+                        if (!ok) return;
+                        this.currentModel = suggested;
                     }
-                    const ok = confirm(
-                        `No model is selected.\n\nLoad "${suggested}" ` +
-                        `(last used in this chat)?`
-                    );
-                    if (!ok) return;
-                    this.currentModel = suggested;
                 } else {
                     // Mismatch prompt: if the chat has prior messages tagged
                     // with a different model, offer to switch. Remember the
