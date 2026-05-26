@@ -43,6 +43,20 @@ def main():
         ],
     )
 
+    # macOS apps launched from Finder inherit a stripped-down PATH from
+    # launchd.  Propagate the user's shell PATH into os.environ so every
+    # subprocess (including the Canopy server and its MCP children) sees
+    # the same directories a Terminal session would.
+    try:
+        from canopy.env import build_mcp_path
+
+        enhanced = build_mcp_path()
+        if enhanced:
+            os.environ["PATH"] = enhanced
+            logging.getLogger(__name__).debug("Enhanced PATH: %s", enhanced)
+    except Exception:
+        pass
+
     try:
         from .app import main as app_main
         app_main()

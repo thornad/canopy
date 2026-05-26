@@ -18,6 +18,8 @@ import os
 import shlex
 from typing import Any, Optional
 
+from .env import build_mcp_env, resolve_command
+
 log = logging.getLogger(__name__)
 
 PROTOCOL_VERSION = "2024-11-05"
@@ -62,9 +64,10 @@ class MCPClient:
     async def start(self) -> None:
         if self.running:
             return
-        merged_env = {**os.environ, **self.env}
+        merged_env = build_mcp_env(os.environ, self.env)
+        resolved_command = resolve_command(self.command, merged_env.get("PATH", ""))
         self._proc = await asyncio.create_subprocess_exec(
-            self.command,
+            resolved_command,
             *self.args,
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
@@ -300,8 +303,9 @@ class MCPRegistry:
                     self._clients[name] = client
                     status[name] = "running"
                 except Exception as e:
-                    status[name] = f"error: {e}"
-                    log.warning("MCP %s failed to start: %s", name, e)
+                    reason = str(e) or type(e).__name__
+                    status[name] = f"error: {reason}"
+                    log.warning("MCP %s failed to start: %s", name, reason)
         return status
 
     @staticmethod
