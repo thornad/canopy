@@ -23,6 +23,7 @@ from Foundation import NSObject, NSRunLoop, NSDefaultRunLoopMode, NSTimer
 from canopy._version import __version__
 from .config import CanopyConfig
 from .server_manager import PortConflict, ServerManager, ServerStatus
+from canopy.release_check import select_latest_stable_release
 from .updater import AppUpdater, GITHUB_REPO
 
 logger = logging.getLogger(__name__)
@@ -44,6 +45,8 @@ class CanopyAppDelegate(NSObject):
 
         self._update_info: Optional[dict] = None
         self._last_update_check: float = 0
+        self._updater: Optional[AppUpdater] = None
+        self._update_progress_text: str = ""
 
         return self
 
@@ -103,6 +106,7 @@ class CanopyAppDelegate(NSObject):
             if not self.server_manager.check_health():
                 pass  # ServerManager health loop handles this
         self._update_icon()
+        self._check_for_updates()
 
     # --- Menu building ---
 
@@ -133,8 +137,15 @@ class CanopyAppDelegate(NSObject):
 
         self.menu.addItem_(NSMenuItem.separatorItem())
 
-        # Update available
-        if self._update_info:
+        # Update available / in progress
+        if self._update_progress_text:
+            prog_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+                f"⏳ {self._update_progress_text}", None, ""
+            )
+            prog_item.setEnabled_(False)
+            self.menu.addItem_(prog_item)
+            self.menu.addItem_(NSMenuItem.separatorItem())
+        elif self._update_info:
             update_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
                 f"🔔 Update Available ({self._update_info['version']})", "openUpdate:", ""
             )
@@ -297,53 +308,184 @@ class CanopyAppDelegate(NSObject):
     # --- Update checking ---
 
     def _check_for_updates(self):
+        """Check GitHub Releases for a new stable version (cached 24 hours)."""
         import time
+
         now = time.time()
         if now - self._last_update_check < 86400:
             return
+
         try:
             resp = requests.get(
-                f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest",
+                f"https://api.github.com/repos/{GITHUB_REPO}/releases",
+                params={"per_page": 20},
                 timeout=10,
             )
             if resp.status_code == 200:
-                data = resp.json()
-                latest = data.get("tag_name", "").lstrip("v")
-                if latest and self._is_newer(latest, __version__):
-                    dmg_url = None
-                    for asset in data.get("assets", []):
-                        if asset.get("name", "").endswith(".dmg"):
-                            dmg_url = asset["browser_download_url"]
-                            break
-                    self._update_info = {
-                        "version": latest,
-                        "dmg_url": dmg_url,
-                        "url": data.get("html_url"),
-                    }
-                    logger.info(f"Update available: {latest}")
+                data = select_latest_stable_release(resp.json())
+                if data is not None:
+                    latest = data["tag_name"].lstrip("v")
+                    if self._is_newer(latest, __version__):
+                        dmg_url = None
+                        for asset in data.get("assets", []):
+                            if asset.get("name", "").endswith(".dmg"):
+                                dmg_url = asset["browser_download_url"]
+                                break
+                        self._update_info = {
+                            "version": latest,
+                            "dmg_url": dmg_url,
+                            "url": data.get("html_url"),
+                            "notes": data.get("body", ""),
+                        }
+                        logger.info("Update available: %s", latest)
+                        self.performSelectorOnMainThread_withObject_waitUntilDone_(
+                            "rebuildMenuOnMain:", None, False
+                        )
+                    else:
+                        self._update_info = None
                 else:
                     self._update_info = None
             self._last_update_check = now
         except Exception as e:
-            logger.debug(f"Update check failed: {e}")
+            logger.debug("Update check failed: %s", e)
+
+    def rebuildMenuOnMain_(self, _):
+        self._build_menu()
 
     @staticmethod
     def _is_newer(latest: str, current: str) -> bool:
         from packaging.version import Version
+
         try:
-            lv = Version(latest)
-            cv = Version(current)
-            if lv.is_prerelease:
-                return False
-            return lv > cv
+            return Version(latest) > Version(current)
         except Exception:
             return False
 
     def openUpdate_(self, sender):
+        """Show confirmation dialog and start auto-update."""
         if not self._update_info:
             return
-        if self._update_info.get("url"):
-            webbrowser.open(self._update_info["url"])
+
+        if not self._update_info.get("dmg_url"):
+            self._open_update_browser()
+            return
+
+        from AppKit import NSAlert, NSAlertFirstButtonReturn
+
+        alert = NSAlert.alloc().init()
+        alert.setMessageText_(
+            f"Update to Canopy {self._update_info['version']}?"
+        )
+        notes = self._update_info.get("notes", "")
+        if len(notes) > 500:
+            notes = notes[:500] + "..."
+        alert.setInformativeText_(
+            f"{notes}\n\n"
+            "The update will be downloaded and installed automatically. "
+            "The app will restart when ready."
+        )
+        alert.addButtonWithTitle_("Update")
+        alert.addButtonWithTitle_("Cancel")
+
+        if alert.runModal() != NSAlertFirstButtonReturn:
+            return
+
+        self._start_auto_update()
+
+    def _open_update_browser(self):
+        url = (
+            self._update_info.get("url")
+            if self._update_info
+            else f"https://github.com/{GITHUB_REPO}/releases"
+        )
+        webbrowser.open(url)
+
+    def _start_auto_update(self):
+        app_path = AppUpdater.get_app_bundle_path()
+        if not AppUpdater.is_writable(app_path):
+            from AppKit import NSAlert, NSAlertFirstButtonReturn
+
+            alert = NSAlert.alloc().init()
+            alert.setMessageText_("Cannot Auto-Update")
+            alert.setInformativeText_(
+                f"Canopy does not have write permission to {app_path.parent}.\n\n"
+                "Please download the update manually from GitHub."
+            )
+            alert.addButtonWithTitle_("Open GitHub")
+            alert.addButtonWithTitle_("Cancel")
+            if alert.runModal() == NSAlertFirstButtonReturn:
+                self._open_update_browser()
+            return
+
+        self._updater = AppUpdater(
+            dmg_url=self._update_info["dmg_url"],
+            version=self._update_info["version"],
+            on_progress=self._on_update_progress,
+            on_error=self._on_update_error,
+            on_ready=self._on_update_ready,
+        )
+        self._updater.start()
+        self._build_menu()
+
+    def _on_update_progress(self, message: str):
+        self.performSelectorOnMainThread_withObject_waitUntilDone_(
+            "updateProgressOnMain:", message, False
+        )
+
+    def updateProgressOnMain_(self, message):
+        self._update_progress_text = message
+        self._build_menu()
+
+    def _on_update_error(self, message: str):
+        self.performSelectorOnMainThread_withObject_waitUntilDone_(
+            "updateErrorOnMain:", message, False
+        )
+
+    def updateErrorOnMain_(self, message):
+        self._updater = None
+        self._update_progress_text = ""
+        self._build_menu()
+
+        from AppKit import NSAlert, NSAlertFirstButtonReturn
+
+        alert = NSAlert.alloc().init()
+        alert.setMessageText_("Update Failed")
+        alert.setInformativeText_(
+            f"{message}\n\n"
+            "Would you like to download the update manually?"
+        )
+        alert.addButtonWithTitle_("Open GitHub")
+        alert.addButtonWithTitle_("Cancel")
+        if alert.runModal() == NSAlertFirstButtonReturn:
+            self._open_update_browser()
+
+    def _on_update_ready(self):
+        self.performSelectorOnMainThread_withObject_waitUntilDone_(
+            "updateReadyOnMain:", None, False
+        )
+
+    def updateReadyOnMain_(self, _):
+        self._updater = None
+        self._update_progress_text = "Installing update..."
+        self._build_menu()
+        self._perform_update_and_relaunch()
+
+    def _perform_update_and_relaunch(self):
+        self.server_manager.stop()
+        if self.health_timer:
+            self.health_timer.invalidate()
+        if AppUpdater.perform_swap_and_relaunch():
+            NSApp.terminate_(None)
+        else:
+            from AppKit import NSAlert
+
+            alert = NSAlert.alloc().init()
+            alert.setMessageText_("Update Failed")
+            alert.setInformativeText_(
+                "Could not find the staged update. Please try again."
+            )
+            alert.addButtonWithTitle_("OK")
+            alert.runModal()
 
 
 def main():
