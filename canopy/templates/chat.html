@@ -2449,7 +2449,13 @@
                                 }
 
                                 if (data.error) {
-                                    this.streamingContent += `\n\n**Error:** ${data.error}`;
+                                    // oMLX emits `{"error": {"message": "...", "type": "..."}}`
+                                    // mid-stream; canopy's own errors are plain strings.
+                                    const e = data.error;
+                                    const msg = typeof e === 'string'
+                                        ? e
+                                        : (e.message || e.error || JSON.stringify(e));
+                                    this.streamingContent += `\n\n**Error:** ${msg}`;
                                     continue;
                                 }
 

@@ -73,6 +73,9 @@ class MCPClient:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             env=merged_env,
+            # MCP tool responses (e.g. RAG search hits) can exceed asyncio's
+            # default 64 KiB readline limit and crash the reader mid-line.
+            limit=16 * 1024 * 1024,
         )
         self._reader_task = asyncio.create_task(self._read_loop())
         self._stderr_task = asyncio.create_task(self._drain_stderr())
