@@ -1111,6 +1111,11 @@ async def export_conversation(conv_id: str, format: str = "markdown"):
 
     lines = [f"# {conv['title']}\n"]
     for msg in active_path:
+        # Skip tool-result messages: the Markdown export is a human-readable
+        # transcript, so raw tool output (role="tool") is noise. JSON export
+        # keeps them for full-fidelity replay.
+        if msg["role"] == "tool":
+            continue
         role = msg["role"].capitalize()
         content = think_re.sub("", msg["content"]).strip()
         if content:
