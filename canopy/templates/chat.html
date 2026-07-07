@@ -908,6 +908,20 @@
                                             <span x-text="(msg.usage?.total_time?.toFixed(1) || '') + 's'"></span>
                                         </span>
                                         <span style="flex:1;"></span>
+                                        <button @click="copyMessage((msg.content || '').replace(/<think>[\s\S]*?<\/think[^>]*>/g, '').trim())"
+                                                style="background:none;border:none;cursor:pointer;color:var(--text-muted);display:flex;align-items:center;gap:3px;font-size:11px;padding:2px 6px;border-radius:4px;transition:all 0.1s;"
+                                                onmouseover="this.style.color='var(--accent)';this.style.background='var(--bg-tertiary)'"
+                                                onmouseout="this.style.color='var(--text-muted)';this.style.background='none'"
+                                                title="Copy">
+                                            <i data-lucide="copy" style="width:11px;height:11px;"></i>
+                                        </button>
+                                        <button @click="saveMessageToFile(msg)"
+                                                style="background:none;border:none;cursor:pointer;color:var(--text-muted);display:flex;align-items:center;gap:3px;font-size:11px;padding:2px 6px;border-radius:4px;transition:all 0.1s;"
+                                                onmouseover="this.style.color='var(--accent)';this.style.background='var(--bg-tertiary)'"
+                                                onmouseout="this.style.color='var(--text-muted)';this.style.background='none'"
+                                                title="Download">
+                                            <i data-lucide="download" style="width:11px;height:11px;"></i>
+                                        </button>
                                         <button @click="branchFromMessage(msg)"
                                                 x-show="idx < activePath.length - 1"
                                                 :disabled="isStreaming"
