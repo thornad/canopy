@@ -1846,8 +1846,7 @@
             nodeCacheTier(msgId) {
                 const s = this.treeCacheMap[msgId];
                 if (!s || s.status !== 'ok' || !s.model_loaded) return 'unknown';
-                const cached = (s.blocks_ram || 0)
-                             + (s.blocks_ssd_hot || 0)
+                const cached = (s.blocks_ssd_hot || 0)
                              + (s.blocks_ssd_disk || 0);
                 return cached > 0 ? 'cached' : 'unknown';
             },
@@ -1860,8 +1859,7 @@
                 if (s.status === 'error') return 'Probe failed';
                 if (!s.model_loaded) return 'Model not loaded';
                 const total = s.total_blocks || 0;
-                const cached = (s.blocks_ram || 0)
-                             + (s.blocks_ssd_hot || 0)
+                const cached = (s.blocks_ssd_hot || 0)
                              + (s.blocks_ssd_disk || 0);
                 const pct = total ? Math.round((cached / total) * 100) : 0;
                 return `${pct}% cached (${cached}/${total} blocks · ${s.total_tokens} tokens)`;
@@ -1894,8 +1892,7 @@
                 // 'unknown' (hollow) otherwise.
                 const s = this.cacheStatusMap[convId];
                 if (!s || s.status !== 'ok' || !s.model_loaded) return 'unknown';
-                const cached = (s.blocks_ram || 0)
-                             + (s.blocks_ssd_hot || 0)
+                const cached = (s.blocks_ssd_hot || 0)
                              + (s.blocks_ssd_disk || 0);
                 return cached > 0 ? 'cached' : 'unknown';
             },
@@ -1908,8 +1905,7 @@
                 if (s.status === 'error') return 'Cache probe failed';
                 if (!s.model_loaded) return 'Model not loaded — load it to probe cache';
                 const total = s.total_blocks || 0;
-                const cached = (s.blocks_ram || 0)
-                             + (s.blocks_ssd_hot || 0)
+                const cached = (s.blocks_ssd_hot || 0)
                              + (s.blocks_ssd_disk || 0);
                 const pct = total ? Math.round((cached / total) * 100) : 0;
                 return `Cache: ${pct}% cached (${cached}/${total} blocks · ${s.total_tokens} tokens)`;
