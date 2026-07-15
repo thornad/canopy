@@ -229,8 +229,9 @@
         .ctx-menu .ctx-danger { color: var(--danger); }
         .ctx-menu .ctx-danger:hover { background: var(--danger-bg); }
 
-        /* Per-chat / per-node cache dot. Binary: blue if anything is cached
-           in the SSD cache, hollow otherwise. Hover tooltip shows the
+        /* Per-chat / per-node cache dot, graded by how much of the prefix is
+           cached: solid = walks straight in, half = real head start, outline
+           = only the shared head, hollow = nothing. Hover tooltip shows the
            percentage and block counts. */
         .cache-dot {
             width: 8px; height: 8px; border-radius: 50%;
@@ -240,6 +241,17 @@
             box-shadow: inset 0 0 0 1px var(--border-faint);
         }
         .cache-dot.cache-cached    { background: #3b82f6; box-shadow: none; }
+        /* Mostly-cold: the shared head (system prompt + tool definitions) is
+           cached, but this branch's own content still needs prefill. */
+        .cache-dot.cache-cold      {
+            background: transparent;
+            box-shadow: inset 0 0 0 1.5px #3b82f6; opacity: 0.45;
+        }
+        /* Part-way: a real chunk of this prefix is cached, but not all. */
+        .cache-dot.cache-partial   {
+            background: linear-gradient(90deg, #3b82f6 50%, transparent 50%);
+            box-shadow: inset 0 0 0 1px #3b82f6;
+        }
         .cache-dot.cache-unknown   { background: transparent; }
 
         .sidebar-footer {
@@ -1867,11 +1879,7 @@
             },
 
             nodeCacheTier(msgId) {
-                const s = this.treeCacheMap[msgId];
-                if (!s || s.status !== 'ok' || !s.model_loaded) return 'unknown';
-                const cached = (s.blocks_ssd_hot || 0)
-                             + (s.blocks_ssd_disk || 0);
-                return cached > 0 ? 'cached' : 'unknown';
+                return this._cacheTier(this.treeCacheMap[msgId]);
             },
 
             nodeCacheTitle(msgId) {
@@ -1911,13 +1919,28 @@
             },
 
             cacheTierFor(convId) {
-                // Binary: 'cached' (blue) if anything is in the SSD cache,
-                // 'unknown' (hollow) otherwise.
-                const s = this.cacheStatusMap[convId];
+                return this._cacheTier(this.cacheStatusMap[convId]);
+            },
+
+            // How much of this prefix would actually be skipped at prefill.
+            //
+            // Deliberately not "has at least one cached block": every chat on
+            // a model shares the same leading blocks (system prompt + tool
+            // definitions), so the moment any one generation runs, that head
+            // is cached and a boolean paints every chat and every root node
+            // solid blue — including ones that would re-prefill almost
+            // everything. Grade by coverage so the dot answers the question
+            // it appears to answer.
+            _cacheTier(s) {
                 if (!s || s.status !== 'ok' || !s.model_loaded) return 'unknown';
+                const total = s.total_blocks || 0;
                 const cached = (s.blocks_ssd_hot || 0)
                              + (s.blocks_ssd_disk || 0);
-                return cached > 0 ? 'cached' : 'unknown';
+                if (!total || cached === 0) return 'unknown';
+                const fraction = cached / total;
+                if (fraction >= 0.9) return 'cached';    // solid — walks straight in
+                if (fraction >= 0.25) return 'partial';  // half — real head start
+                return 'cold';                           // outline — shared head only
             },
 
             cacheTitleFor(convId) {
