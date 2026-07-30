@@ -2484,7 +2484,18 @@
             get isStreamingHere() {
                 if (!this.isStreaming) return false;
                 if (this.streamConvId !== this.currentConversationId) return false;
-                return this._activeTipId() === this.streamParentId;
+                // The live answer attaches at streamParentId. During tool-calling
+                // the loop persists intermediate tool rows *below* that parent as
+                // it runs, so after navigating away and back the active-path tip
+                // can be a descendant of streamParentId rather than streamParentId
+                // itself. Treat any tip inside that subtree as "here" — walk up
+                // from the tip to check whether streamParentId is an ancestor.
+                let cur = this._activeTipId();
+                while (cur) {
+                    if (cur === this.streamParentId) return true;
+                    cur = this.messageTree[cur]?.parent_id;
+                }
+                return false;
             },
 
             _activeTipId() {
@@ -2509,6 +2520,7 @@
                 this.autoScrollEnabled = true;
                 this.thinkingState = { isInThinking: false, startTime: null };
                 this._firstTokenReceived = false;
+                this._streamError = null;
                 this._prefillStartTime = Date.now();
 
                 // Estimate prompt tokens from active path
@@ -2570,6 +2582,10 @@
                                     const msg = typeof e === 'string'
                                         ? e
                                         : (e.message || e.error || JSON.stringify(e));
+                                    // Remember it: the error path saves no message, so the
+                                    // streaming bubble (and this text) is cleared in finally.
+                                    // Without this the failure would vanish silently.
+                                    this._streamError = msg;
                                     this.streamingContent += `\n\n**Error:** ${msg}`;
                                     continue;
                                 }
@@ -2634,6 +2650,7 @@
                         }
                     } else {
                         console.error('Streaming error:', error);
+                        this._streamError = error.message || String(error);
                     }
                 } finally {
                     if (this._renderTimer) { clearTimeout(this._renderTimer); this._renderTimer = null; }
@@ -2661,10 +2678,33 @@
                         // the tree gets it — their view stays put, and the
                         // remembered selection surfaces it on navigating back.
                         if (this.currentConversationId === convId) {
-                            const wasHere = this._activeTipId() === parentMsgId;
-                            this.addToTree(msg);
-                            this.branchSelections[parentMsgId] = msgId;
-                            if (wasHere) this.activePath.push(msg);
+                            const tip = this._activeTipId();
+                            // Was the user viewing the branch that just finished?
+                            // Simple Q→A: tip === parentMsgId. A tool-calling turn
+                            // watched after navigating back saved intermediate rows
+                            // below the question, so tip is a *descendant* of
+                            // parentMsgId and the answer's true parent is the last
+                            // tool row — not parentMsgId.
+                            let cur = tip, onBranch = false;
+                            while (cur) {
+                                if (cur === parentMsgId) { onBranch = true; break; }
+                                cur = this.messageTree[cur]?.parent_id;
+                            }
+                            if (tip === parentMsgId) {
+                                // Fast path: splice in place, no reload flash.
+                                this.addToTree(msg);
+                                this.branchSelections[parentMsgId] = msgId;
+                                this.activePath.push(msg);
+                            } else if (onBranch) {
+                                // Tool-calling turn: rebuild from the server so the
+                                // answer attaches under its real parent, then focus
+                                // it (done after streamingContent clears, below).
+                                this._reloadFocusId = msgId;
+                            } else {
+                                // Different branch of this chat — drop into the tree.
+                                this.addToTree(msg);
+                                this.branchSelections[parentMsgId] = msgId;
+                            }
                         }
                         // else: user switched chats — messageTree now belongs
                         // to another conversation, so leave it alone. The
@@ -2674,6 +2714,12 @@
                         this.$nextTick(() => { this.streamingContent = ''; });
                     } else {
                         this.isStreaming = false;
+                        // No message was saved. If that's because oMLX errored,
+                        // tell the user — otherwise the send looks like a no-op.
+                        if (this._streamError) {
+                            const em = this._streamError;
+                            this.$nextTick(() => alert('oMLX could not answer:\n\n' + em));
+                        }
                         this.$nextTick(() => { this.streamingContent = ''; });
                     }
 
@@ -2683,6 +2729,16 @@
                     this.abortController = null;
                     this._lastStructure = '';
                     this._lastRenderedLen = 0;
+                    // Tool-calling turn watched after navigating back: rebuild the
+                    // tree from the server so the answer sits under its real parent
+                    // (the last tool row), then focus it. Done here, after the
+                    // streaming state is torn down, so the live bubble is replaced
+                    // cleanly by the saved message.
+                    if (this._reloadFocusId) {
+                        const fid = this._reloadFocusId;
+                        this._reloadFocusId = null;
+                        await this.reloadCurrentConversation(fid);
+                    }
                     this.$nextTick(() => lucide.createIcons());
                     this.pollOmlxStats(); // refresh stats after each response
                     // Cache just grew — update the active branch's dot and
