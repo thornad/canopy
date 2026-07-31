@@ -110,6 +110,20 @@
             background: var(--accent-light); color: var(--accent);
             border-radius: 10px;
         }
+        .sidebar-header .version {
+            align-self: center;
+            display: inline-block;
+            font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+            font-weight: 500; letter-spacing: 0.2px;
+            color: var(--text-muted);
+            /* The browser's "minimum font size" setting clamps small font-size
+               values (why 10px and 5px looked identical). transform: scale isn't
+               subject to that clamp, so shrink visually here instead. */
+            font-size: 12px;
+            transform: scale(0.72);
+            transform-origin: left center;
+            position: relative; top: 2px;
+        }
 
         .new-chat-btn {
             margin: 12px; padding: 8px 12px;
@@ -701,7 +715,7 @@
             <h1>
                 <i data-lucide="trees" style="width:20px;height:20px;color:var(--accent);"></i>
                 Canopy
-                <span class="badge">cache-aware</span>
+                <span class="version">v{{ version }}</span>
             </h1>
         </div>
         <button class="new-chat-btn" @click="newChat()">

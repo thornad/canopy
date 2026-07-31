@@ -12,6 +12,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from . import database as db
+from ._version import __version__
 from .documents import parse_document
 from .mcp import MCPClient, MCPError, parse_args_string, parse_env_string, registry as mcp_registry
 from .models import (
@@ -71,7 +72,7 @@ async def chat_page(request: Request):
     # New starlette signature (request, name, context). The legacy form
     # `TemplateResponse("chat.html", {"request": request})` crashes with
     # newer Jinja2 caching ("unhashable type: 'dict'").
-    return templates.TemplateResponse(request, "chat.html", {})
+    return templates.TemplateResponse(request, "chat.html", {"version": __version__})
 
 
 # --- Health ---
