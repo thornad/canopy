@@ -43,8 +43,11 @@ class ChatRequest(BaseModel):
 
 
 class SettingsUpdate(BaseModel):
+    active_backend: Optional[str] = None  # "omlx" | "ds4"
     omlx_url: Optional[str] = None
     omlx_api_key: Optional[str] = None
+    ds4_url: Optional[str] = None
+    ds4_api_key: Optional[str] = None
     theme: Optional[str] = None
     system_prompt: Optional[str] = None
 

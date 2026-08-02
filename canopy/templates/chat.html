@@ -302,6 +302,17 @@
         .icon-btn:hover { background: var(--bg-tertiary); color: var(--text-secondary); }
 
         /* Model selector */
+        .backend-toggle {
+            display: inline-flex; align-items: center; margin-right: 8px;
+            border: 1px solid var(--border-faint); border-radius: 8px; overflow: hidden;
+        }
+        .backend-toggle button {
+            padding: 5px 10px; font-size: 12px; font-weight: 600;
+            background: transparent; color: var(--text-muted);
+            border: none; cursor: pointer; transition: all 0.12s;
+        }
+        .backend-toggle button:hover { background: var(--bg-tertiary); color: var(--text-primary); }
+        .backend-toggle button.active { background: var(--accent); color: #fff; }
         .model-select {
             position: relative; display: flex; align-items: center;
         }
@@ -756,7 +767,8 @@
                                           x-text="formatRelativeTime(conv.updated_at)"
                                           :title="formatAbsoluteTime(conv.updated_at)"></span>
                                 </div>
-                                <span class="cache-dot" :class="'cache-' + cacheTierFor(conv.id)"
+                                <span class="cache-dot" x-show="activeBackend === 'omlx'"
+                                      :class="'cache-' + cacheTierFor(conv.id)"
                                       :title="cacheTitleFor(conv.id)"></span>
                                 <button class="delete-btn" @click.stop="deleteConversation(conv.id)"
                                         title="Delete">
@@ -779,7 +791,8 @@
                               x-text="formatRelativeTime(conv.updated_at)"
                               :title="formatAbsoluteTime(conv.updated_at)"></span>
                     </div>
-                    <span class="cache-dot" :class="'cache-' + cacheTierFor(conv.id)"
+                    <span class="cache-dot" x-show="activeBackend === 'omlx'"
+                          :class="'cache-' + cacheTierFor(conv.id)"
                           :title="cacheTitleFor(conv.id)"></span>
                     <button class="delete-btn" @click.stop="deleteConversation(conv.id)"
                             title="Delete">
@@ -811,6 +824,14 @@
                 </button>
             </div>
 
+            <!-- Backend selector (oMLX / DS4) -->
+            <div class="backend-toggle" title="Inference backend">
+                <button :class="{ active: activeBackend === 'omlx' }"
+                        @click="switchBackend('omlx')">oMLX</button>
+                <button :class="{ active: activeBackend === 'ds4' }"
+                        @click="switchBackend('ds4')">DS4</button>
+            </div>
+
             <!-- Model selector -->
             <div class="model-select" x-data="{ open: false }">
                 <button class="model-select-btn" @click="open = !open">
@@ -824,8 +845,8 @@
                                 @click="selectModel(m.id); open = false" x-text="m.id"></button>
                     </template>
                     <div x-show="availableModels.length === 0"
-                         style="padding:12px;font-size:13px;color:var(--text-tertiary);text-align:center;">
-                        No models available. Check oMLX connection.
+                         style="padding:12px;font-size:13px;color:var(--text-tertiary);text-align:center;"
+                         x-text="'No models available. Check ' + (activeBackend === 'ds4' ? 'DS4' : 'oMLX') + ' connection.'">
                     </div>
                 </div>
             </div>
@@ -1138,6 +1159,16 @@
                        placeholder="Enter API key">
             </div>
             <div class="setting-group">
+                <div class="setting-label">DS4 Server URL</div>
+                <input class="setting-input" type="text" x-model="settings.ds4_url"
+                       placeholder="http://localhost:8001">
+            </div>
+            <div class="setting-group">
+                <div class="setting-label">DS4 API Key</div>
+                <input class="setting-input" type="password" x-model="settings.ds4_api_key"
+                       placeholder="Optional">
+            </div>
+            <div class="setting-group">
                 <div class="setting-label">System Prompt</div>
                 <textarea class="setting-textarea" x-model="settings.system_prompt"
                           placeholder="Optional system prompt shared across all conversations"></textarea>
@@ -1357,10 +1388,18 @@
             theme: localStorage.getItem('canopy-theme') || 'light',
             isDragOver: false,
 
+            // Active inference backend: 'omlx' | 'ds4'. Drives which URL the
+            // server proxies to and which oMLX-only features (cache dots,
+            // context meter, stats) are shown.
+            activeBackend: 'omlx',
+
             // Settings (loaded from server)
             settings: {
+                active_backend: 'omlx',
                 omlx_url: 'http://localhost:8000',
                 omlx_api_key: '',
+                ds4_url: 'http://localhost:8001',
+                ds4_api_key: '',
                 system_prompt: '',
                 theme: 'light',
             },
@@ -1514,10 +1553,36 @@
                     const resp = await fetch('/api/settings');
                     if (resp.ok) {
                         this.settings = await resp.json();
+                        this.activeBackend = this.settings.active_backend || 'omlx';
                         this.theme = this.settings.theme || 'light';
                         localStorage.setItem('canopy-theme', this.theme);
                     }
                 } catch (e) { console.error('Failed to load settings:', e); }
+            },
+
+            // Switch inference backend (oMLX <-> DS4). Persists the choice, then
+            // reloads the model list (each backend has its own) and clears the
+            // selected model since it won't exist on the other engine.
+            async switchBackend(backend) {
+                if (backend === this.activeBackend) return;
+                this.activeBackend = backend;
+                this.settings.active_backend = backend;
+                try {
+                    await fetch('/api/settings', {
+                        method: 'PUT',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ active_backend: backend }),
+                    });
+                } catch (e) { console.error('Failed to switch backend:', e); }
+                this.currentModel = null;
+                this.modelContextWindows = {};
+                this.omlxStats = { cache_efficiency: null, avg_generation_tps: 0 };
+                this.cacheStatusMap = {};
+                await this.loadModels();
+                if (this.activeBackend === 'omlx') {
+                    this.loadCacheStatus();
+                    this.pollOmlxStats();
+                }
             },
 
             async saveSettings() {
@@ -1795,6 +1860,7 @@
             },
 
             async pollOmlxStats() {
+                if (this.activeBackend !== 'omlx') return;  // oMLX-only
                 try {
                     const resp = await fetch('/api/omlx-stats');
                     if (resp.ok) {
@@ -1825,6 +1891,7 @@
             },
 
             async loadCacheStatus() {
+                if (this.activeBackend !== 'omlx') return;  // cache dots are oMLX-only
                 // Best-effort probe of all conversations' cache state. Fails
                 // silently when oMLX is unreachable or the model isn't loaded.
                 try {
@@ -1846,6 +1913,7 @@
             },
 
             async probeActiveBranch() {
+                if (this.activeBackend !== 'omlx') return;  // oMLX-only
                 // Probe the currently selected branch (activePath tip), so
                 // the sidebar dot on the active chat reflects the user's
                 // actual view rather than the DB's newest leaf.
@@ -1864,6 +1932,7 @@
             },
 
             async loadTreeCacheStatus() {
+                if (this.activeBackend !== 'omlx') { this.treeCacheMap = {}; return; }  // oMLX-only
                 // Per-node cache probes for the current conversation's tree.
                 // Each node is a potential "tip" with its own unique prefix
                 // — so the dot next to each node answers "what's cached if
@@ -2313,7 +2382,9 @@
                 html += `<div class="node-body">`;
                 html += `  <div class="node-text" title="${this._escHtml(preview)}">${previewHtml}</div>`;
                 const metaParts = [];
-                metaParts.push(`<span class="cache-dot cache-${cacheTier}" title="${this._escHtml(cacheTitle)}"></span>`);
+                if (this.activeBackend === 'omlx') {  // cache dots are oMLX-only
+                    metaParts.push(`<span class="cache-dot cache-${cacheTier}" title="${this._escHtml(cacheTitle)}"></span>`);
+                }
                 if (relTime) {
                     metaParts.push(`<span class="node-time" title="${this._escHtml(absTime)}">${this._escHtml(relTime)}</span>`);
                 }

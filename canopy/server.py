@@ -1,6 +1,7 @@
 """Canopy FastAPI server — chat UI, conversation API, SSE proxy to oMLX."""
 
 import json
+import re
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Optional
@@ -57,6 +58,27 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Canopy", lifespan=lifespan)
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
+
+
+def _active_backend(settings: dict) -> dict:
+    """Resolve the active inference backend from settings.
+
+    Returns {"type": "omlx"|"ds4", "url": str, "key": str}. Both backends are
+    OpenAI-compatible for chat/models; only oMLX serves the /admin/api cache &
+    stats endpoints, so callers of those gate on ``type == "omlx"``.
+    """
+    backend = settings.get("active_backend", "omlx")
+    if backend == "ds4":
+        return {
+            "type": "ds4",
+            "url": settings.get("ds4_url", "http://localhost:8001"),
+            "key": settings.get("ds4_api_key", ""),
+        }
+    return {
+        "type": "omlx",
+        "url": settings.get("omlx_url", "http://localhost:8000"),
+        "key": settings.get("omlx_api_key", ""),
+    }
 
 
 # --- Pages ---
@@ -322,19 +344,26 @@ async def delete_message(msg_id: str):
 # --- SSE Proxy to oMLX ---
 
 
-def _path_to_openai_messages(path: list[dict]) -> list[dict]:
+def _path_to_openai_messages(path: list[dict], strip_reasoning: bool = False) -> list[dict]:
     """Rebuild an OpenAI-style messages array from a DB path.
 
     Handles tool rows (``role='tool'``) and assistant rows that carry
     ``tool_calls`` so probes and chat requests replay the exact sequence
     oMLX saw originally — otherwise the cache hashes diverge after any
     tool-calling turn.
+
+    ``strip_reasoning`` removes ``<think>...</think>`` blocks from assistant
+    content. Canopy stores reasoning inline in the saved content; oMLX replays
+    it fine, but DS4 streams reasoning as a native block and does not expect
+    prior inline think on replay, so the DS4 chat path strips it.
     """
     out: list[dict] = []
     for msg in path:
         role = msg.get("role") or "user"
         content = msg.get("content", "")
         if isinstance(content, str):
+            if strip_reasoning and role == "assistant" and "<think>" in content:
+                content = re.sub(r"<think>[\s\S]*?</think>", "", content).lstrip("\n")
             try:
                 parsed = json.loads(content)
                 if isinstance(parsed, list):
@@ -565,8 +594,9 @@ async def _generate_with_tools(
 async def chat_proxy(body: ChatRequest):
     """Stream chat completion from oMLX and save the assistant message."""
     settings = await db.get_settings()
-    omlx_url = settings.get("omlx_url", "http://localhost:8000")
-    api_key = settings.get("omlx_api_key", "")
+    _backend = _active_backend(settings)
+    omlx_url = _backend["url"]
+    api_key = _backend["key"]
 
     # Build messages array by walking tree from root to parent_id
     path = await db.get_message_path(body.parent_id)
@@ -578,7 +608,9 @@ async def chat_proxy(body: ChatRequest):
     messages = []
     if system_prompt:
         messages.append({"role": "system", "content": system_prompt})
-    messages.extend(_path_to_openai_messages(path))
+    messages.extend(
+        _path_to_openai_messages(path, strip_reasoning=_backend["type"] == "ds4")
+    )
 
     headers = {"Content-Type": "application/json"}
     if api_key:
@@ -681,8 +713,11 @@ async def chat_proxy(body: ChatRequest):
 async def models_status():
     """Proxy to oMLX /v1/models/status for context window info."""
     settings = await db.get_settings()
-    omlx_url = settings.get("omlx_url", "http://localhost:8000")
-    api_key = settings.get("omlx_api_key", "")
+    _backend = _active_backend(settings)
+    if _backend["type"] != "omlx":
+        return {"models": []}  # context-window info is oMLX-only
+    omlx_url = _backend["url"]
+    api_key = _backend["key"]
     headers = {}
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
@@ -698,8 +733,9 @@ async def models_status():
 async def list_models():
     """Proxy to oMLX /v1/models."""
     settings = await db.get_settings()
-    omlx_url = settings.get("omlx_url", "http://localhost:8000")
-    api_key = settings.get("omlx_api_key", "")
+    _backend = _active_backend(settings)
+    omlx_url = _backend["url"]
+    api_key = _backend["key"]
 
     headers = {}
     if api_key:
@@ -708,17 +744,49 @@ async def list_models():
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
             resp = await client.get(f"{omlx_url}/v1/models", headers=headers)
-            return resp.json()
+            data = resp.json()
     except Exception as e:
-        raise HTTPException(502, f"Cannot reach oMLX: {e}")
+        raise HTTPException(502, f"Cannot reach {_backend['type']}: {e}")
+
+    # DS4 advertises fixed alias ids per model family for the single GGUF loaded
+    # with -m, all carrying the same `name`. Some are redundant tier aliases
+    # (deepseek-v4-flash / -pro both = the loaded model); others are meaningful
+    # thinking-mode selectors (glm-5.2-chat disables thinking, glm-5.2-reasoner
+    # forces it). Collapse only the redundant base tiers by name; keep every
+    # mode variant so the user can still pick reasoning on/off.
+    if _backend["type"] == "ds4" and isinstance(data, dict) and isinstance(data.get("data"), list):
+        MODE_SUFFIXES = ("-chat", "-reasoner", "-no-think", "-nothink", "-think")
+        kept: list = []
+        base_by_name: dict = {}
+        for m in data["data"]:
+            if not isinstance(m, dict):
+                continue
+            mid = str(m.get("id", ""))
+            if any(mid.endswith(sfx) for sfx in MODE_SUFFIXES):
+                kept.append(m)  # distinct thinking-mode variant — always keep
+                continue
+            name = m.get("name") or mid
+            slug = str(name).lower().replace(" ", "-")
+            prev = base_by_name.get(name)
+            if prev is None:
+                base_by_name[name] = m
+                kept.append(m)
+            elif mid == slug:  # prefer the base alias whose id matches the loaded name
+                kept[kept.index(prev)] = m
+                base_by_name[name] = m
+        data["data"] = kept
+    return data
 
 
 @app.get("/api/omlx-stats")
 async def omlx_stats():
     """Proxy oMLX cache and performance stats."""
     settings = await db.get_settings()
-    omlx_url = settings.get("omlx_url", "http://localhost:8000")
-    api_key = settings.get("omlx_api_key", "")
+    _backend = _active_backend(settings)
+    if _backend["type"] != "omlx":
+        return {"error": "backend_not_omlx"}  # stats are oMLX-only
+    omlx_url = _backend["url"]
+    api_key = _backend["key"]
 
     try:
         async with httpx.AsyncClient(timeout=5.0) as client:
@@ -771,8 +839,11 @@ async def _probe_leaf_cache(
     the dropdown invalidates the visible cache state until re-probed.
     """
     settings = await db.get_settings()
-    omlx_url = settings.get("omlx_url", "http://localhost:8000")
-    api_key = settings.get("omlx_api_key", "")
+    _backend = _active_backend(settings)
+    if _backend["type"] != "omlx":
+        return {"status": "unavailable", "leaf_id": leaf_id}  # cache probe is oMLX-only
+    omlx_url = _backend["url"]
+    api_key = _backend["key"]
 
     path = await db.get_message_path(leaf_id)
     if not path:
@@ -882,8 +953,11 @@ async def cache_probe_batch(conv_id: str, body: dict):
         return {}
 
     settings = await db.get_settings()
-    omlx_url = settings.get("omlx_url", "http://localhost:8000")
-    api_key = settings.get("omlx_api_key", "")
+    _backend = _active_backend(settings)
+    if _backend["type"] != "omlx":
+        return {}  # per-node cache probes are oMLX-only
+    omlx_url = _backend["url"]
+    api_key = _backend["key"]
 
     results: dict = {}
     try:
@@ -919,8 +993,11 @@ async def cache_status_all(model: Optional[str] = None):
     would be cached if I switched to this model and sent?").
     """
     settings = await db.get_settings()
-    omlx_url = settings.get("omlx_url", "http://localhost:8000")
-    api_key = settings.get("omlx_api_key", "")
+    _backend = _active_backend(settings)
+    if _backend["type"] != "omlx":
+        return {}  # cache dots are oMLX-only
+    omlx_url = _backend["url"]
+    api_key = _backend["key"]
 
     conversations = await db.list_conversations()
     results: dict = {}
@@ -985,8 +1062,11 @@ async def list_asr_models():
     on disk today (whisper-*, VibeVoice-ASR-*) and reasonable variants.
     """
     settings = await db.get_settings()
-    omlx_url = settings.get("omlx_url", "http://localhost:8000")
-    api_key = settings.get("omlx_api_key", "")
+    _backend = _active_backend(settings)
+    if _backend["type"] != "omlx":
+        return {"data": []}  # transcription is oMLX-only
+    omlx_url = _backend["url"]
+    api_key = _backend["key"]
     headers = {}
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
@@ -1018,8 +1098,11 @@ async def transcribe_audio(
     the resulting transcript as a Canopy document attachment.
     """
     settings = await db.get_settings()
-    omlx_url = settings.get("omlx_url", "http://localhost:8000")
-    api_key = settings.get("omlx_api_key", "")
+    _backend = _active_backend(settings)
+    if _backend["type"] != "omlx":
+        raise HTTPException(400, "Audio transcription requires the oMLX backend")
+    omlx_url = _backend["url"]
+    api_key = _backend["key"]
     headers = {}
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"

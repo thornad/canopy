@@ -77,8 +77,14 @@ CREATE TABLE IF NOT EXISTS mcp_servers (
 """
 
 DEFAULT_SETTINGS = {
+    # Active inference backend: "omlx" or "ds4". oMLX and DS4 (antirez's
+    # DeepSeek-V4 engine) are both OpenAI-compatible; only oMLX exposes the
+    # cache/stats admin endpoints, so the UI gates those on the active backend.
+    "active_backend": "omlx",
     "omlx_url": "http://localhost:8000",
     "omlx_api_key": "",
+    "ds4_url": "http://localhost:8001",
+    "ds4_api_key": "",
     "theme": "light",
     "system_prompt": "",
 }
