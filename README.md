@@ -84,6 +84,30 @@ Then open <http://localhost:8100/chat>.
    model to use — pick one that's listed in oMLX. Subsequent sends will
    remember the choice per-chat.
 
+## Backends — oMLX or DS4
+
+Canopy talks to an OpenAI-compatible engine and can use either **oMLX** or
+**DS4** (antirez's DeepSeek-V4 engine). Pick the active one with the
+**oMLX | DS4** toggle in the header; each has its own URL and API key in
+Settings, and you can switch anytime.
+
+Both default to port **8000**, so to run them side by side something has to
+move. The recommended layout keeps oMLX on its usual `:8000` and puts DS4 on
+`:8001`:
+
+```sh
+ds4-server --port 8001 --ctx 100000 -m /path/to/model.gguf
+```
+
+Canopy's **DS4 Server URL** therefore defaults to `http://localhost:8001`. If
+you run ds4 on its native `:8000` instead, point that setting at `:8000` (and
+don't also run oMLX there). Canopy talks to exactly the URL you configure — it
+does not scan ports — and shows **"DS4 unreachable"** in the model selector if
+nothing answers.
+
+oMLX-only features (the cache dots, the context-window meter, and cache stats)
+are hidden while DS4 is active, since DS4 doesn't expose oMLX's admin endpoints.
+
 ## The cache dots — what they mean
 
 Every tree node and every sidebar entry has a small colored dot next to it:

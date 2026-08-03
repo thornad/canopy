@@ -835,8 +835,11 @@
             <!-- Model selector -->
             <div class="model-select" x-data="{ open: false }">
                 <button class="model-select-btn" @click="open = !open">
-                    <i data-lucide="cpu" style="width:16px;height:16px;color:var(--text-tertiary);"></i>
-                    <span x-text="currentModel || 'Select Model'"></span>
+                    <i data-lucide="cpu" style="width:16px;height:16px;"
+                       :style="backendReachable ? 'color:var(--text-tertiary)' : 'color:var(--danger)'"></i>
+                    <span x-show="backendReachable" x-text="currentModel || 'Select Model'"></span>
+                    <span x-show="!backendReachable" x-cloak style="color:var(--danger);"
+                          x-text="(activeBackend === 'ds4' ? 'DS4' : 'oMLX') + ' unreachable'"></span>
                     <i data-lucide="chevron-down" style="width:14px;height:14px;color:var(--text-muted);"></i>
                 </button>
                 <div class="model-dropdown custom-scrollbar" x-show="open" @click.away="open = false" x-cloak>
@@ -1162,6 +1165,10 @@
                 <div class="setting-label">DS4 Server URL</div>
                 <input class="setting-input" type="text" x-model="settings.ds4_url"
                        placeholder="http://localhost:8001">
+                <div style="font-size:11px;color:var(--text-muted);margin-top:4px;">
+                    ds4-server defaults to :8000. Run it on :8001
+                    (<code>ds4-server --port 8001</code>) to use it alongside oMLX.
+                </div>
             </div>
             <div class="setting-group">
                 <div class="setting-label">DS4 API Key</div>
@@ -1392,6 +1399,9 @@
             // server proxies to and which oMLX-only features (cache dots,
             // context meter, stats) are shown.
             activeBackend: 'omlx',
+            // Whether the active backend answered the last model-list fetch.
+            // False when its server isn't running / reachable on its port.
+            backendReachable: true,
 
             // Settings (loaded from server)
             settings: {
@@ -1730,9 +1740,18 @@
                     if (modelsResp.ok) {
                         const data = await modelsResp.json();
                         this.availableModels = data.data || [];
+                        this.backendReachable = true;
                         // Deliberately NO auto-select: the user picks the
                         // model explicitly (or confirms the chat's last-used
                         // model at send time). See sendMessage().
+                    } else {
+                        // The active backend is unreachable (e.g. DS4 isn't
+                        // running on its port). Clear the list so we don't show
+                        // the *other* backend's stale models; the dropdown's
+                        // "check <backend> connection" hint then appears.
+                        this.availableModels = [];
+                        this.currentModel = null;
+                        this.backendReachable = false;
                     }
                     if (statusResp.ok) {
                         const status = await statusResp.json();
@@ -1741,8 +1760,17 @@
                             if (m.max_context_window) map[m.id] = m.max_context_window;
                         }
                         this.modelContextWindows = map;
+                    } else {
+                        this.modelContextWindows = {};
                     }
-                } catch (e) { /* oMLX not reachable */ }
+                } catch (e) {
+                    // Couldn't even reach Canopy's own API — clear so stale
+                    // models from a prior backend don't linger.
+                    this.availableModels = [];
+                    this.currentModel = null;
+                    this.modelContextWindows = {};
+                    this.backendReachable = false;
+                }
             },
 
             selectModel(id) { this.currentModel = id; },
