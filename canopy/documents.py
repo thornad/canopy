@@ -3,8 +3,6 @@
 import io
 from pathlib import Path
 
-MAX_CONTENT_CHARS = 100_000
-
 
 def parse_document(file_bytes: bytes, filename: str) -> dict:
     """Parse a document and return extracted text.
@@ -23,24 +21,13 @@ def parse_document(file_bytes: bytes, filename: str) -> dict:
     else:
         content = _parse_fallback(file_bytes, filename)
 
-    # Truncate very large documents
-    truncated = False
-    if len(content) > MAX_CONTENT_CHARS:
-        content = content[:MAX_CONTENT_CHARS]
-        truncated = True
-
     token_estimate = len(content) // 4
 
-    result = {
+    return {
         "filename": filename,
         "content": content,
         "token_estimate": token_estimate,
     }
-    if truncated:
-        result["truncated"] = True
-        result["content"] += f"\n\n[Document truncated at {MAX_CONTENT_CHARS:,} characters]"
-
-    return result
 
 
 def _parse_pdf(file_bytes: bytes) -> str:
