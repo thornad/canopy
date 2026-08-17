@@ -27,6 +27,9 @@ dev = [
     "pytest>=7.0",
     "pytest-asyncio>=0.21",
     "httpx",
+    # packaging/build.py renders AppIcon.icns through AppKit; without it the
+    # build prints "Icon creation failed" and ships an iconless bundle.
+    "pyobjc-framework-Cocoa>=10.0; sys_platform == 'darwin'",
 ]
 
 [tool.setuptools.dynamic]

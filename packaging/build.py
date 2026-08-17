@@ -325,50 +325,67 @@ def create_app_bundle():
 
 
 def _create_icon(resources_dir: Path):
-    """Create app icon — a tree emoji rendered to ICNS."""
+    """Create app icon — a tree emoji rendered to ICNS.
+
+    Failure is fatal. An iconless bundle looks like a broken install, and the
+    cause — no pyobjc in the *building* interpreter, which is not the one the
+    app ships with — leaves no trace in the finished .app.
+    """
     try:
-        # Try using AppKit to render an emoji to PNG
-        from AppKit import NSFont, NSString, NSMakeRect, NSImage, NSBitmapImageRep, NSPNGFileType
-        from AppKit import NSGraphicsContext, NSCompositingOperationSourceOver
+        from AppKit import NSFont, NSString, NSImage, NSBitmapImageRep, NSPNGFileType
+    except ImportError:
+        print("  ✗ Cannot render the app icon: AppKit (pyobjc) is missing from the")
+        print(f"    building interpreter ({sys.executable})")
+        print('    fix: pip install -e ".[dev]"')
+        print("    or:  PYTHON=.venv/bin/python scripts/build-app.sh")
+        sys.exit(1)
 
-        sizes = [1024, 512, 256, 128, 64, 32, 16]
-        iconset_dir = resources_dir / "AppIcon.iconset"
-        iconset_dir.mkdir(exist_ok=True)
+    sizes = [1024, 512, 256, 128, 64, 32, 16]
+    iconset_dir = resources_dir / "AppIcon.iconset"
+    iconset_dir.mkdir(exist_ok=True)
 
-        for size in sizes:
-            img = NSImage.alloc().initWithSize_((size, size))
-            img.lockFocus()
-            emoji = NSString.stringWithString_("🌲")
-            font = NSFont.systemFontOfSize_(size * 0.8)
-            attrs = {
-                "NSFont": font,
-            }
-            emoji.drawAtPoint_withAttributes_((size * 0.1, size * 0.05), attrs)
-            img.unlockFocus()
+    for size in sizes:
+        img = NSImage.alloc().initWithSize_((size, size))
+        img.lockFocus()
+        emoji = NSString.stringWithString_("🌲")
+        font = NSFont.systemFontOfSize_(size * 0.8)
+        attrs = {
+            "NSFont": font,
+        }
+        emoji.drawAtPoint_withAttributes_((size * 0.1, size * 0.05), attrs)
+        img.unlockFocus()
 
-            rep = NSBitmapImageRep.alloc().initWithData_(img.TIFFRepresentation())
-            png_data = rep.representationUsingType_properties_(NSPNGFileType, {})
+        rep = NSBitmapImageRep.alloc().initWithData_(img.TIFFRepresentation())
+        png_data = rep.representationUsingType_properties_(NSPNGFileType, {})
 
-            # Write standard and @2x sizes
-            if size <= 512:
-                png_data.writeToFile_atomically_(str(iconset_dir / f"icon_{size}x{size}.png"), True)
-            if size >= 32:
-                half = size // 2
-                if half >= 16:
-                    png_data.writeToFile_atomically_(str(iconset_dir / f"icon_{half}x{half}@2x.png"), True)
+        # Write standard and @2x sizes
+        if size <= 512:
+            png_data.writeToFile_atomically_(str(iconset_dir / f"icon_{size}x{size}.png"), True)
+        if size >= 32:
+            half = size // 2
+            if half >= 16:
+                png_data.writeToFile_atomically_(str(iconset_dir / f"icon_{half}x{half}@2x.png"), True)
 
-        # Convert iconset to icns
-        result = subprocess.run(
-            ["iconutil", "-c", "icns", str(iconset_dir), "-o", str(resources_dir / "AppIcon.icns")],
-            capture_output=True,
-        )
-        shutil.rmtree(iconset_dir)
+    # Convert iconset to icns
+    result = subprocess.run(
+        ["iconutil", "-c", "icns", str(iconset_dir), "-o", str(resources_dir / "AppIcon.icns")],
+        capture_output=True,
+    )
+    shutil.rmtree(iconset_dir)
 
-        if result.returncode == 0:
-            print("    Created app icon (AppKit)")
-            return
-    except Exception as e:
-        print(f"    Icon creation failed ({e}), skipping")
+    if result.returncode != 0:
+        print(f"  ✗ iconutil failed (exit {result.returncode})")
+        stderr = result.stderr.decode(errors="replace").strip()
+        if stderr:
+            print(f"    {stderr}")
+        sys.exit(1)
+
+    icns = resources_dir / "AppIcon.icns"
+    if not icns.exists():
+        print(f"  ✗ iconutil reported success but {icns.name} is missing")
+        sys.exit(1)
+
+    print("    Created app icon (AppKit)")
 
 
 # === Phase 3: Sign ===
