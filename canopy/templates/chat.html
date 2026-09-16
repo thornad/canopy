@@ -77,6 +77,7 @@
         }
 
         * { box-sizing: border-box; margin: 0; padding: 0; }
+        [x-cloak] { display: none !important; }
 
         body {
             font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
@@ -294,6 +295,18 @@
             background: var(--bg-primary); flex-shrink: 0;
         }
         .header-left { display: flex; align-items: center; gap: 8px; }
+        .update-banner {
+            display: flex; align-items: center; justify-content: center; gap: 12px;
+            padding: 8px 16px; font-size: 13px; flex-shrink: 0;
+            background: var(--accent-light); color: var(--text-primary);
+            border-bottom: 1px solid var(--border-faint);
+        }
+        .update-banner button {
+            font: inherit; font-weight: 600; cursor: pointer;
+            padding: 4px 12px; border-radius: 6px; border: none;
+            background: var(--btn-primary); color: var(--btn-primary-text);
+        }
+        .update-banner button:hover { background: var(--btn-primary-hover); }
         .icon-btn {
             width: 32px; height: 32px; display: flex; align-items: center; justify-content: center;
             background: none; border: none; cursor: pointer; border-radius: 6px;
@@ -816,6 +829,12 @@
 
     <!-- Main content -->
     <div class="main">
+        <!-- Shown when the server was updated after this tab loaded: the page
+             is still running the old code until it is reloaded. -->
+        <div class="update-banner" x-show="serverVersion && serverVersion !== pageVersion" x-cloak>
+            <span>Canopy was updated to <strong x-text="'v' + serverVersion"></strong>. This tab is still running v{{ version }}.</span>
+            <button @click="location.reload()">Reload</button>
+        </div>
         <!-- Header -->
         <div class="header">
             <div class="header-left">
@@ -1453,6 +1472,11 @@
             childrenMap: {},        // parent_id → [child_ids] (ordered by created_at)
             activePath: [],         // current path from root to leaf
 
+            // Version this page was rendered with vs. the one the server now
+            // reports — they differ once Canopy is updated under an open tab.
+            pageVersion: '{{ version }}',
+            serverVersion: null,
+
             // Models
             availableModels: [],
             currentModel: null,
@@ -1531,6 +1555,8 @@
                 this.pollOmlxStats();
                 setInterval(() => this.pollOmlxStats(), 15000);
                 setInterval(() => this.loadCacheStatus(), 20000);
+                setInterval(() => this.checkServerVersion(), 30000);
+                window.addEventListener('focus', () => this.checkServerVersion());
                 this._registerTreeNav();
 
                 this.$watch('activePath', () => {
@@ -1887,6 +1913,13 @@
                         }
                     }
                 } catch (e) { /* non-critical */ }
+            },
+
+            async checkServerVersion() {
+                try {
+                    const resp = await fetch('/api/health');
+                    if (resp.ok) this.serverVersion = (await resp.json()).version || null;
+                } catch (e) { /* server restarting — try again next tick */ }
             },
 
             async pollOmlxStats() {

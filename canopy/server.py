@@ -102,7 +102,8 @@ async def chat_page(request: Request):
 
 @app.get("/api/health")
 async def health():
-    return {"status": "ok"}
+    # The version lets an open tab notice the server was updated underneath it.
+    return {"status": "ok", "version": __version__}
 
 
 # --- Settings ---
