@@ -145,8 +145,10 @@ This has two useful implications in Canopy:
   creates a sibling answer (new branch) and switches the view to it.
 - **Edit** — click ✏️ on any message to create a branch with an edited
   version of that turn.
-- The tree panel auto-opens the moment you create your first branch in
-  a chat. Toggle it manually with the tree icon in the header.
+- The tree panel is open by default for every chat, branched or not, so
+  you can always see where you are in the conversation. Toggle it with the
+  tree icon in the header — if you close it, it stays closed across chats
+  and restarts until you open it again.
 
 ## Requirements
 

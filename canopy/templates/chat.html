@@ -856,8 +856,8 @@
 
             <div style="display:flex;align-items:center;gap:4px;">
                 <!-- Tree view toggle -->
-                <button class="icon-btn" x-show="currentConversationId && Object.keys(messageTree).length > 0"
-                        @click="treeOpen = !treeOpen"
+                <button class="icon-btn" x-show="currentConversationId"
+                        @click="setTreeOpen(!treeOpen)"
                         :style="treeOpen ? 'color:var(--accent)' : ''"
                         title="Toggle tree view" x-cloak>
                     <i data-lucide="git-fork" style="width:18px;height:18px;"></i>
@@ -1123,11 +1123,11 @@
     </div>
 
     <!-- Tree Panel (inline, not overlay) -->
-    <div class="tree-panel" :class="{ hidden: !treeOpen }" x-ref="treePanel">
+    <div class="tree-panel" :class="{ hidden: !treeOpen || !currentConversationId }" x-ref="treePanel">
         <div class="tree-resize-handle" @mousedown="startTreeResize($event)"></div>
         <div class="tree-panel-header">
             <span>Conversation Tree</span>
-            <button class="icon-btn" @click="treeOpen = false" style="width:24px;height:24px;">
+            <button class="icon-btn" @click="setTreeOpen(false)" style="width:24px;height:24px;">
                 <i data-lucide="x" style="width:14px;height:14px;"></i>
             </button>
         </div>
@@ -1457,8 +1457,10 @@
             availableModels: [],
             currentModel: null,
 
-            // Tree panel
-            treeOpen: false,
+            // Tree panel — shown by default for every conversation, branched
+            // or not, since the tree is how you read where you are. Closing it
+            // is a sticky user choice.
+            treeOpen: localStorage.getItem('canopy-tree-open') !== '0',
 
             // Branch selections: parentId → selectedChildId (remembers which branch at each fork)
             branchSelections: {},
@@ -2141,7 +2143,6 @@
                     // chat's previously-used model.
                     this.buildTree(conv.messages || []);
                     this.computeActivePath();
-                    this.treeOpen = this._hasBranches();
                 } catch (e) { console.error('Failed to load conversation:', e); }
                 this.sidebarOpen = window.innerWidth >= 768;
                 // Probe the actual active branch (not the DB newest leaf)
@@ -2202,12 +2203,6 @@
                 const parentKey = msg.parent_id || '__root__';
                 if (!this.childrenMap[parentKey]) this.childrenMap[parentKey] = [];
                 this.childrenMap[parentKey].push(msg.id);
-                // Auto-open the tree panel the moment a branch first exists
-                // so the user doesn't have to toggle it manually after their
-                // first fork.
-                if (!this.treeOpen && this.childrenMap[parentKey].length > 1) {
-                    this.treeOpen = true;
-                }
             },
 
             computeActivePath(startFromId = null) {
@@ -2299,12 +2294,9 @@
                 }
             },
 
-            _hasBranches() {
-                // Check if any message has more than one child
-                for (const key in this.childrenMap) {
-                    if (this.childrenMap[key].length > 1) return true;
-                }
-                return false;
+            setTreeOpen(open) {
+                this.treeOpen = open;
+                localStorage.setItem('canopy-tree-open', open ? '1' : '0');
             },
 
             // === Tree Rendering ===
