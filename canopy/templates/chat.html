@@ -2008,6 +2008,9 @@
                         // (latest-leaf) probe.
                         for (const [k, v] of Object.entries(data)) {
                             if (k.startsWith('_')) continue;
+                            // "skipped": probing paused during generation
+                            // and nothing known yet — keep the current dot.
+                            if (v?.status === 'skipped') continue;
                             this.cacheStatusMap[k] = v;
                         }
                     }
@@ -2028,7 +2031,9 @@
                     const resp = await fetch(url);
                     if (resp.ok) {
                         const data = await resp.json();
-                        this.cacheStatusMap[this.currentConversationId] = data;
+                        if (data?.status !== 'skipped') {
+                            this.cacheStatusMap[this.currentConversationId] = data;
+                        }
                     }
                 } catch (e) { /* best-effort */ }
             },
@@ -2041,7 +2046,12 @@
                 // I continued from here". One batch request to amortize the
                 // oMLX login across all nodes.
                 if (!this.currentConversationId) return;
-                const ids = Object.keys(this.messageTree);
+                // Only nodes the tree renders get a dot. Probing hidden rows
+                // (answers, tool plumbing) made oMLX tokenize the whole chat
+                // once per message for dots nobody sees.
+                const ids = Object.values(this.messageTree)
+                    .filter(m => !this._isHiddenMessage(m))
+                    .map(m => m.id);
                 if (ids.length === 0) { this.treeCacheMap = {}; return; }
                 try {
                     const resp = await fetch(
@@ -2058,7 +2068,11 @@
                     if (!resp.ok) return;
                     const data = await resp.json();
                     if (data && !data._error) {
-                        this.treeCacheMap = data;
+                        const merged = {};
+                        for (const [k, v] of Object.entries(data)) {
+                            merged[k] = v?.status === 'skipped' ? this.treeCacheMap[k] : v;
+                        }
+                        this.treeCacheMap = merged;
                         // Re-render tree if currently visible (x-effect
                         // won't fire on a plain map mutation).
                         if (this.treeOpen && this.$refs.treeContainer) {

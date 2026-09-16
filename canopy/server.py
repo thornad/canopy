@@ -1,7 +1,9 @@
 """Canopy FastAPI server — chat UI, conversation API, SSE proxy to oMLX."""
 
+import asyncio
 import json
 import re
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Optional
@@ -421,6 +423,32 @@ def _path_to_openai_messages(
     return out
 
 
+# Cache probes make oMLX render and tokenize a whole conversation, synchronously
+# on its event loop. With tool-heavy chats that is seconds per sweep, which
+# stalls token streaming. So probes pause while Canopy is generating and never
+# run concurrently; a paused probe answers with its last known result.
+_active_generations = 0
+_generation_epoch = 0
+_probe_lock = asyncio.Lock()
+_sweep_lock = asyncio.Lock()
+_last_probe: dict[tuple, dict] = {}
+_last_sweep: dict[Optional[str], tuple[float, dict]] = {}
+SWEEP_REUSE_SECONDS = 15.0
+
+
+async def _track_generation(stream):
+    """Mark a chat stream as generating for as long as it is being consumed."""
+    global _active_generations, _generation_epoch
+    _active_generations += 1
+    _generation_epoch += 1
+    try:
+        async for chunk in stream:
+            yield chunk
+    finally:
+        _active_generations -= 1
+        await stream.aclose()
+
+
 def _omit_earlier_tool_results(settings: dict) -> bool:
     return settings.get("earlier_tool_results", "full") == "omit"
 
@@ -665,7 +693,9 @@ async def chat_proxy(body: ChatRequest):
 
     if tool_specs:
         return StreamingResponse(
-            _generate_with_tools(body, messages, tool_specs, omlx_url, headers),
+            _track_generation(
+                _generate_with_tools(body, messages, tool_specs, omlx_url, headers)
+            ),
             media_type="text/event-stream",
         )
 
@@ -748,7 +778,7 @@ async def chat_proxy(body: ChatRequest):
             }
             yield f"data: {json.dumps(done_event)}\n\n"
 
-    return StreamingResponse(generate(), media_type="text/event-stream")
+    return StreamingResponse(_track_generation(generate()), media_type="text/event-stream")
 
 
 # --- Models proxy ---
@@ -941,17 +971,32 @@ async def _probe_leaf_cache(
             return {"status": "error", "detail": resp.text, "leaf_id": leaf_id}
         return {"status": "ok", "leaf_id": leaf_id, **resp.json()}
 
-    try:
-        if client is not None and cookies is not None:
-            return await _send(client, cookies)
-        async with httpx.AsyncClient(timeout=10.0) as c:
-            login_resp = await c.post(
-                f"{omlx_url}/admin/api/login",
-                json={"api_key": api_key},
-            )
-            return await _send(c, login_resp.cookies)
-    except Exception as e:
-        return {"status": "error", "detail": str(e), "leaf_id": leaf_id}
+    key = (leaf_id, model)
+
+    def _paused() -> dict:
+        return _last_probe.get(key) or {"status": "skipped", "leaf_id": leaf_id}
+
+    if _active_generations:
+        return _paused()
+    async with _probe_lock:
+        # A generation may have started while we waited for the lock.
+        if _active_generations:
+            return _paused()
+        try:
+            if client is not None and cookies is not None:
+                result = await _send(client, cookies)
+            else:
+                async with httpx.AsyncClient(timeout=10.0) as c:
+                    login_resp = await c.post(
+                        f"{omlx_url}/admin/api/login",
+                        json={"api_key": api_key},
+                    )
+                    result = await _send(c, login_resp.cookies)
+        except Exception as e:
+            return {"status": "error", "detail": str(e), "leaf_id": leaf_id}
+    if result.get("status") == "ok":
+        _last_probe[key] = result
+    return result
 
 
 @app.get("/api/conversations/{conv_id}/cache-probe")
@@ -1048,6 +1093,20 @@ async def cache_status_all(model: Optional[str] = None):
     omlx_url = _backend["url"]
     api_key = _backend["key"]
 
+    # Several tabs poll this; share one sweep instead of stacking them.
+    async with _sweep_lock:
+        recent = _last_sweep.get(model)
+        if recent and time.monotonic() - recent[0] < SWEEP_REUSE_SECONDS:
+            return recent[1]
+        epoch = _generation_epoch
+        results = await _sweep_cache_status(omlx_url, api_key, model)
+        # Don't reuse a sweep that generation paused part-way through.
+        if epoch == _generation_epoch and not _active_generations and "_error" not in results:
+            _last_sweep[model] = (time.monotonic(), results)
+        return results
+
+
+async def _sweep_cache_status(omlx_url: str, api_key: str, model: Optional[str]) -> dict:
     conversations = await db.list_conversations()
     results: dict = {}
     try:
