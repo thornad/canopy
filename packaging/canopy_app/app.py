@@ -305,6 +305,12 @@ class CanopyAppDelegate(NSObject):
         self.server_manager.stop()
         NSApp.terminate_(self)
 
+    def applicationWillTerminate_(self, notification):
+        # Every orderly quit lands here — the menu item, but also AppleScript
+        # `quit`, Activity Monitor's Quit and logout/restart — so the server
+        # stops with the app. stop() is a no-op if it already ran.
+        self.server_manager.stop()
+
     # --- Update checking ---
 
     def _check_for_updates(self):

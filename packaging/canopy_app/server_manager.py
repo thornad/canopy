@@ -114,7 +114,12 @@ class ServerManager:
         log_file = LOG_DIR / "server.log"
 
         python = _get_python()
-        args = [python, "-m", "canopy"] + self.config.build_serve_args()
+        # --parent-pid makes the server exit if this app dies without
+        # calling stop() (crash, force quit): it runs in its own session,
+        # so it would otherwise keep running on its own.
+        args = [python, "-m", "canopy"] + self.config.build_serve_args() + [
+            "--parent-pid", str(os.getpid()),
+        ]
 
         try:
             log_fh = open(log_file, "a")
