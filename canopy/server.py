@@ -345,7 +345,23 @@ async def delete_message(msg_id: str):
 # --- SSE Proxy to oMLX ---
 
 
-def _path_to_openai_messages(path: list[dict], strip_reasoning: bool = False) -> list[dict]:
+EARLIER_TOOL_RESULT_PLACEHOLDER = "[tool result from an earlier question omitted]"
+
+
+def _is_content_parts(value) -> bool:
+    """True for an OpenAI-style content-part list (every item has a ``type``)."""
+    return (
+        isinstance(value, list)
+        and len(value) > 0
+        and all(isinstance(item, dict) and "type" in item for item in value)
+    )
+
+
+def _path_to_openai_messages(
+    path: list[dict],
+    strip_reasoning: bool = False,
+    omit_earlier_tool_results: bool = False,
+) -> list[dict]:
     """Rebuild an OpenAI-style messages array from a DB path.
 
     Handles tool rows (``role='tool'``) and assistant rows that carry
@@ -357,27 +373,43 @@ def _path_to_openai_messages(path: list[dict], strip_reasoning: bool = False) ->
     content. Canopy stores reasoning inline in the saved content; oMLX replays
     it fine, but DS4 streams reasoning as a native block and does not expect
     prior inline think on replay, so the DS4 chat path strips it.
+
+    Tool results replay as the exact text the live tool loop sent. Many MCP
+    tools return JSON *text* (e.g. a list of search hits); parsing that into a
+    list turned it into bogus content parts, which oMLX drops as non-text —
+    the model then saw every earlier result as empty.
+
+    ``omit_earlier_tool_results`` replaces tool results that precede the last
+    user message with a short placeholder, trading completeness for a smaller
+    context on follow-up questions. Results for the current question are
+    always kept, so resuming a tool loop still sees everything it fetched.
     """
+    last_user_idx = max(
+        (i for i, m in enumerate(path) if (m.get("role") or "user") == "user"),
+        default=-1,
+    )
     out: list[dict] = []
-    for msg in path:
+    for idx, msg in enumerate(path):
         role = msg.get("role") or "user"
         content = msg.get("content", "")
-        if isinstance(content, str):
-            if strip_reasoning and role == "assistant" and "<think>" in content:
-                content = re.sub(r"<think>[\s\S]*?</think>", "", content).lstrip("\n")
-            try:
-                parsed = json.loads(content)
-                if isinstance(parsed, list):
-                    content = parsed
-            except (json.JSONDecodeError, TypeError):
-                pass
         if role == "tool":
+            if omit_earlier_tool_results and idx < last_user_idx:
+                content = EARLIER_TOOL_RESULT_PLACEHOLDER
             out.append({
                 "role": "tool",
                 "tool_call_id": msg.get("tool_call_id") or "",
                 "content": content,
             })
             continue
+        if isinstance(content, str):
+            if strip_reasoning and role == "assistant" and "<think>" in content:
+                content = re.sub(r"<think>[\s\S]*?</think>", "", content).lstrip("\n")
+            try:
+                parsed = json.loads(content)
+                if _is_content_parts(parsed):
+                    content = parsed
+            except (json.JSONDecodeError, TypeError):
+                pass
         entry: dict = {"role": role, "content": content}
         raw_tc = msg.get("tool_calls")
         if raw_tc:
@@ -387,6 +419,10 @@ def _path_to_openai_messages(path: list[dict], strip_reasoning: bool = False) ->
                 pass
         out.append(entry)
     return out
+
+
+def _omit_earlier_tool_results(settings: dict) -> bool:
+    return settings.get("earlier_tool_results", "full") == "omit"
 
 
 MCP_MAX_TURNS = 10
@@ -614,7 +650,11 @@ async def chat_proxy(body: ChatRequest):
     if system_prompt:
         messages.append({"role": "system", "content": system_prompt})
     messages.extend(
-        _path_to_openai_messages(path, strip_reasoning=_backend["type"] == "ds4")
+        _path_to_openai_messages(
+            path,
+            strip_reasoning=_backend["type"] == "ds4",
+            omit_earlier_tool_results=_omit_earlier_tool_results(settings),
+        )
     )
 
     headers = {"Content-Type": "application/json"}
@@ -876,7 +916,11 @@ async def _probe_leaf_cache(
     messages: list[dict] = []
     if system_prompt:
         messages.append({"role": "system", "content": system_prompt})
-    messages.extend(_path_to_openai_messages(path))
+    messages.extend(
+        _path_to_openai_messages(
+            path, omit_earlier_tool_results=_omit_earlier_tool_results(settings)
+        )
+    )
 
     # oMLX v0.3.6+ includes ``tools`` in the chat-template hash, so a probe
     # that omits them won't match the cache entries written by a real chat

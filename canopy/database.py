@@ -87,6 +87,9 @@ DEFAULT_SETTINGS = {
     "ds4_api_key": "",
     "theme": "light",
     "system_prompt": "",
+    # Tool results from questions before the latest one: "full" replays them,
+    # "omit" swaps in a placeholder to keep follow-up prompts small.
+    "earlier_tool_results": "full",
 }
 
 

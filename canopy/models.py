@@ -1,6 +1,6 @@
 """Pydantic models for Canopy API requests and responses."""
 
-from typing import Optional
+from typing import Literal, Optional
 
 from pydantic import BaseModel, Field
 
@@ -50,6 +50,7 @@ class SettingsUpdate(BaseModel):
     ds4_api_key: Optional[str] = None
     theme: Optional[str] = None
     system_prompt: Optional[str] = None
+    earlier_tool_results: Optional[Literal["full", "omit"]] = None
 
 
 class DocumentParseResponse(BaseModel):

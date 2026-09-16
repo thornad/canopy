@@ -1203,6 +1203,19 @@
                 </div>
             </div>
             <div class="setting-group">
+                <div class="setting-label">Tool results from earlier questions</div>
+                <select class="setting-input" x-model="settings.earlier_tool_results" style="width:100%;">
+                    <option value="full">Keep in full</option>
+                    <option value="omit">Leave out</option>
+                </select>
+                <div style="font-size:11px;color:var(--text-muted);margin-top:4px;">
+                    What the model sees from tool calls made for questions before your latest one.
+                    Leaving them out keeps long tool-heavy chats small, but the model can no longer
+                    quote those results. Results for the current question are always kept.
+                    Changing this makes the next message in existing chats re-read them from scratch (no cache).
+                </div>
+            </div>
+            <div class="setting-group">
                 <div class="setting-label" style="display:flex;justify-content:space-between;align-items:center;">
                     <span>MCP Servers</span>
                     <button class="icon-btn"
@@ -1430,6 +1443,7 @@
                 ds4_url: 'http://localhost:8001',
                 ds4_api_key: '',
                 system_prompt: '',
+                earlier_tool_results: 'full',
                 theme: 'light',
             },
 
