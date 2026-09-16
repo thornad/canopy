@@ -284,3 +284,53 @@ class TestMcpJsonSync:
         await db.sync_mcp_from_json(self._write(tmp_path, {"a": {"command": "x"}, "b": {"command": "y"}}))
         await db.sync_mcp_from_json(self._write(tmp_path, {"a": {"command": "x"}}))
         assert await self._enabled() == {"a": False}
+
+
+# --- Reply stats ---
+
+
+class TestMessageUsage:
+    async def test_usage_is_saved_and_loaded_with_the_message(self):
+        conv = await db.create_conversation(title="t")
+        stats = {"prompt_tokens": 10_234, "completion_tokens": 2_631, "generation_tokens_per_second": 26.0}
+        msg = await db.add_message(conv["id"], "assistant", "hi", usage=stats)
+        assert msg["usage"] == stats
+
+        loaded = await db.get_conversation(conv["id"])
+        assert loaded["messages"][0]["usage"] == stats
+        assert (await db.get_message_path(msg["id"]))[0]["usage"] == stats
+
+    async def test_messages_without_usage_load_as_none(self):
+        conv = await db.create_conversation(title="t")
+        await db.add_message(conv["id"], "user", "q")
+        loaded = await db.get_conversation(conv["id"])
+        assert loaded["messages"][0]["usage"] is None
+
+    async def test_existing_database_gains_the_column(self, tmp_path):
+        import aiosqlite
+
+        path = tmp_path / "old.db"
+        async with aiosqlite.connect(path) as old:
+            await old.executescript(
+                """
+                CREATE TABLE conversations (id TEXT PRIMARY KEY, title TEXT, system_prompt TEXT,
+                    model TEXT, created_at REAL, updated_at REAL);
+                CREATE TABLE messages (id TEXT PRIMARY KEY, conversation_id TEXT, parent_id TEXT,
+                    role TEXT CHECK(role IN ('system', 'user', 'assistant', 'tool')), content TEXT,
+                    model TEXT, token_count INTEGER DEFAULT 0, cache_hit INTEGER DEFAULT 0,
+                    tool_calls TEXT, tool_call_id TEXT, created_at REAL);
+                INSERT INTO conversations VALUES ('c', 't', '', '', 1, 1);
+                INSERT INTO messages (id, conversation_id, role, content, created_at)
+                    VALUES ('m', 'c', 'assistant', 'old reply', 1);
+                """
+            )
+            await old.commit()
+
+        await db.close_db()
+        await db.init_db(path)
+
+        loaded = await db.get_conversation("c")
+        assert loaded["messages"][0]["content"] == "old reply"
+        assert loaded["messages"][0]["usage"] is None
+        new = await db.add_message("c", "assistant", "new", usage={"prompt_tokens": 1})
+        assert (await db.get_conversation("c"))["messages"][1]["usage"] == {"prompt_tokens": 1}

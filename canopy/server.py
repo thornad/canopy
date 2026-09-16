@@ -456,6 +456,55 @@ def _omit_earlier_tool_results(settings: dict) -> bool:
 MCP_MAX_TURNS = 10
 
 
+class UsageTotals:
+    """Combine oMLX's per-request usage into the stats shown under a reply.
+
+    A tool-calling reply is several requests. ``prompt_tokens`` is the context
+    of the latest one (summing would count the shared history once per turn);
+    generated tokens and timings add up. Prompt speed counts only tokens that
+    were actually processed — oMLX's own figure divides the whole prompt,
+    cached part included, by the prefill time, which overstates it.
+    """
+
+    def __init__(self) -> None:
+        self.prompt_tokens = 0
+        self.completion_tokens = 0
+        self.prefill_tokens = 0
+        self.prefill_seconds = 0.0
+        self.generation_tokens = 0
+        self.generation_seconds = 0.0
+        self.total_time = 0.0
+
+    def add(self, usage: dict) -> None:
+        prompt = usage.get("prompt_tokens") or 0
+        completion = usage.get("completion_tokens") or 0
+        self.prompt_tokens = prompt
+        self.completion_tokens += completion
+        cached = (usage.get("prompt_tokens_details") or {}).get("cached_tokens") or 0
+        if usage.get("prompt_eval_duration"):
+            self.prefill_tokens += max(prompt - cached, 0)
+            self.prefill_seconds += usage["prompt_eval_duration"]
+        if usage.get("generation_duration"):
+            self.generation_tokens += completion
+            self.generation_seconds += usage["generation_duration"]
+        if usage.get("total_time"):
+            self.total_time += usage["total_time"]
+
+    def to_dict(self) -> dict:
+        out: dict = {
+            "prompt_tokens": self.prompt_tokens,
+            "completion_tokens": self.completion_tokens,
+            "total_tokens": self.prompt_tokens + self.completion_tokens,
+        }
+        if self.prefill_seconds > 0 and self.prefill_tokens > 0:
+            out["prompt_tokens_per_second"] = round(self.prefill_tokens / self.prefill_seconds, 1)
+        if self.generation_seconds > 0 and self.generation_tokens > 0:
+            out["generation_tokens_per_second"] = round(self.generation_tokens / self.generation_seconds, 1)
+        if self.total_time > 0:
+            out["total_time"] = round(self.total_time, 2)
+        return out
+
+
 async def _generate_with_tools(
     body: ChatRequest,
     messages: list[dict],
@@ -474,16 +523,10 @@ async def _generate_with_tools(
     """
     accumulated_reasoning = ""
     final_content = ""
-    usage_total: dict = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+    usage_total = UsageTotals()
     # Walk the parent chain as we save each intermediate turn so a future
     # probe / next send replays the exact sequence oMLX just cached.
     current_parent = body.parent_id
-
-    def _merge_usage(u: dict) -> None:
-        for k in ("prompt_tokens", "completion_tokens", "total_tokens"):
-            v = u.get(k)
-            if v is not None:
-                usage_total[k] = (usage_total.get(k) or 0) + v
 
     try:
         async with httpx.AsyncClient(timeout=httpx.Timeout(600.0, connect=10.0)) as client:
@@ -531,7 +574,7 @@ async def _generate_with_tools(
                             continue
 
                         if "usage" in data and data["usage"]:
-                            _merge_usage(data["usage"])
+                            usage_total.add(data["usage"])
 
                         choices = data.get("choices") or []
                         if not choices:
@@ -650,11 +693,12 @@ async def _generate_with_tools(
             parent_id=current_parent,
             model=body.model,
             token_count=len(full_content) // 4,
+            usage=usage_total.to_dict(),
         )
         done_event = {
             "type": "done",
             "message_id": saved["id"],
-            "usage": usage_total,
+            "usage": saved["usage"],
         }
         yield f"data: {json.dumps(done_event)}\n\n"
 
@@ -709,7 +753,7 @@ async def chat_proxy(body: ChatRequest):
     async def generate():
         full_content = ""
         in_thinking = False
-        usage_data = {}
+        usage_data = UsageTotals()
         try:
             async with httpx.AsyncClient(timeout=httpx.Timeout(300.0, connect=10.0)) as client:
                 async with client.stream(
@@ -734,7 +778,7 @@ async def chat_proxy(body: ChatRequest):
                                 data = json.loads(line[6:])
                                 # Capture usage (comes in final chunk with empty choices)
                                 if "usage" in data and data["usage"]:
-                                    usage_data = data["usage"]
+                                    usage_data.add(data["usage"])
                                 # Parse content delta
                                 choices = data.get("choices", [])
                                 if choices:
@@ -770,11 +814,12 @@ async def chat_proxy(body: ChatRequest):
                 parent_id=body.parent_id,
                 model=body.model,
                 token_count=len(full_content) // 4,
+                usage=usage_data.to_dict(),
             )
             done_event = {
                 'type': 'done',
                 'message_id': msg['id'],
-                'usage': usage_data,
+                'usage': msg['usage'],
             }
             yield f"data: {json.dumps(done_event)}\n\n"
 

@@ -704,6 +704,8 @@
             border-top: 1px solid var(--border-faint);
         }
         .msg-stats span { display: flex; align-items: center; gap: 3px; }
+        /* "10,234(400) prompt": count, speed and label run together inline. */
+        .msg-stats .stat-value, .msg-stats .stat-value span { display: inline; }
 
         /* Prefill status */
         .prefill-cached { color: var(--accent) !important; font-weight: 500; }
@@ -980,17 +982,15 @@
                                     </div>
                                     <div class="msg-body markdown-content" x-html="renderMarkdown(msg.content)"></div>
                                     <div class="msg-stats">
-                                        <span x-show="msg.usage?.prompt_tokens" title="Prompt tokens (context sent)">
+                                        <span x-show="msg.usage?.prompt_tokens" title="Prompt tokens (context sent) and prompt processing speed in tokens/s (uncached tokens only)">
                                             <i data-lucide="arrow-up" style="width:10px;height:10px;"></i>
-                                            <span x-text="msg.usage?.prompt_tokens || ''"></span> prompt
-                                            <span x-show="msg.usage?.prompt_tokens_per_second" style="color:var(--text-muted);"
-                                                  x-text="'(' + (msg.usage?.prompt_tokens_per_second?.toFixed(0) || '') + ' t/s)'"></span>
+                                            <span class="stat-value"><span x-text="fmtNum(msg.usage?.prompt_tokens)"></span><span x-show="msg.usage?.prompt_tokens_per_second" style="color:var(--text-tertiary);"
+                                                  x-text="'(' + fmtNum(msg.usage?.prompt_tokens_per_second) + ')'"></span> prompt</span>
                                         </span>
-                                        <span x-show="msg.usage?.completion_tokens" title="Completion tokens (generated)">
+                                        <span x-show="msg.usage?.completion_tokens" title="Generated tokens and generation speed in tokens/s">
                                             <i data-lucide="arrow-down" style="width:10px;height:10px;"></i>
-                                            <span x-text="msg.usage?.completion_tokens || ''"></span> gen
-                                            <span x-show="msg.usage?.generation_tokens_per_second" style="color:var(--text-muted);"
-                                                  x-text="'(' + (msg.usage?.generation_tokens_per_second?.toFixed(0) || '') + ' t/s)'"></span>
+                                            <span class="stat-value"><span x-text="fmtNum(msg.usage?.completion_tokens)"></span><span x-show="msg.usage?.generation_tokens_per_second" style="color:var(--text-tertiary);"
+                                                  x-text="'(' + fmtNum(msg.usage?.generation_tokens_per_second) + ')'"></span> gen</span>
                                         </span>
                                         <span x-show="msg.usage?.total_time" title="Total time">
                                             <i data-lucide="clock" style="width:10px;height:10px;"></i>
@@ -2687,6 +2687,11 @@
                     cur = this.messageTree[cur]?.parent_id;
                 }
                 return false;
+            },
+
+            // Whole number with comma thousands separators: 1234567 → "1,234,567".
+            fmtNum(n) {
+                return n == null || isNaN(n) ? '' : Math.round(n).toLocaleString('en-US');
             },
 
             _activeTipId() {

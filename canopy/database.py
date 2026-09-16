@@ -43,6 +43,7 @@ CREATE TABLE IF NOT EXISTS messages (
     cache_hit INTEGER DEFAULT 0,
     tool_calls TEXT,
     tool_call_id TEXT,
+    usage TEXT,
     created_at REAL
 );
 
@@ -146,6 +147,12 @@ async def init_db(db_path: Optional[Path] = None):
             CREATE INDEX IF NOT EXISTS idx_messages_parent ON messages(parent_id);
             """
         )
+
+    # Stats shown under a reply (token counts, speeds) as JSON. Added in
+    # place; older rows simply have none.
+    cursor = await _db.execute("PRAGMA table_info(messages)")
+    if "usage" not in {row["name"] for row in await cursor.fetchall()}:
+        await _db.execute("ALTER TABLE messages ADD COLUMN usage TEXT")
 
     # Migrate pre-existing DBs that lack the conversations.folder_id column.
     # SQLite supports adding nullable columns in-place, so a simple ALTER is
@@ -260,7 +267,7 @@ async def get_conversation(conv_id: str) -> Optional[dict]:
         (conv_id,),
     )
     msg_rows = await msg_cursor.fetchall()
-    conv["messages"] = [dict(r) for r in msg_rows]
+    conv["messages"] = [_message_row(r) for r in msg_rows]
 
     # Fetch documents
     doc_cursor = await db.execute(
@@ -351,6 +358,18 @@ async def delete_folder(folder_id: str) -> bool:
 # --- Messages ---
 
 
+def _message_row(row) -> dict:
+    """A messages row as a dict, with the stored ``usage`` JSON decoded."""
+    msg = dict(row)
+    raw = msg.get("usage")
+    if isinstance(raw, str):
+        try:
+            msg["usage"] = json.loads(raw)
+        except json.JSONDecodeError:
+            msg["usage"] = None
+    return msg
+
+
 async def add_message(
     conversation_id: str,
     role: str,
@@ -361,6 +380,7 @@ async def add_message(
     cache_hit: bool = False,
     tool_calls: Optional[list] = None,
     tool_call_id: Optional[str] = None,
+    usage: Optional[dict] = None,
 ) -> dict:
     db = _get_db()
     msg_id = _new_id()
@@ -369,11 +389,12 @@ async def add_message(
     await db.execute(
         "INSERT INTO messages "
         "(id, conversation_id, parent_id, role, content, model, token_count, cache_hit, "
-        "tool_calls, tool_call_id, created_at) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "tool_calls, tool_call_id, usage, created_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (
             msg_id, conversation_id, parent_id, role, content, model,
-            token_count, int(cache_hit), tc_json, tool_call_id, now,
+            token_count, int(cache_hit), tc_json, tool_call_id,
+            json.dumps(usage) if usage else None, now,
         ),
     )
     # Touch conversation updated_at
@@ -393,6 +414,7 @@ async def add_message(
         "cache_hit": cache_hit,
         "tool_calls": tc_json,
         "tool_call_id": tool_call_id,
+        "usage": usage or None,
         "created_at": now,
     }
 
@@ -409,7 +431,7 @@ async def get_message_path(message_id: str) -> list[dict]:
         row = await cursor.fetchone()
         if row is None:
             break
-        path.append(dict(row))
+        path.append(_message_row(row))
         current_id = row["parent_id"]
     path.reverse()
     return path
@@ -423,7 +445,7 @@ async def get_children(message_id: str) -> list[dict]:
         (message_id,),
     )
     rows = await cursor.fetchall()
-    return [dict(r) for r in rows]
+    return [_message_row(r) for r in rows]
 
 
 async def get_root_messages(conversation_id: str) -> list[dict]:
@@ -435,7 +457,7 @@ async def get_root_messages(conversation_id: str) -> list[dict]:
         (conversation_id,),
     )
     rows = await cursor.fetchall()
-    return [dict(r) for r in rows]
+    return [_message_row(r) for r in rows]
 
 
 async def get_latest_leaf(conversation_id: str) -> Optional[dict]:
@@ -453,7 +475,7 @@ async def get_latest_leaf(conversation_id: str) -> Optional[dict]:
         (conversation_id,),
     )
     row = await cursor.fetchone()
-    return dict(row) if row else None
+    return _message_row(row) if row else None
 
 
 async def delete_message_tree(message_id: str) -> bool:
