@@ -557,7 +557,11 @@ async def _generate_with_tools(
                 final_content = turn_content
                 break
             else:
-                yield f"data: {json.dumps({'error': 'Exceeded max tool-call turns'})}\n\n"
+                # Turn budget spent. Every intermediate turn is already saved,
+                # so hand the client the tip of that chain: it asks the user
+                # and, if they agree, resumes with a fresh budget from there.
+                yield f"data: {json.dumps({'type': 'tool_limit', 'parent_id': current_parent, 'turns': MCP_MAX_TURNS})}\n\n"
+                yield "data: [DONE]\n\n"
                 return
     except httpx.ConnectError:
         yield f"data: {json.dumps({'error': f'Cannot connect to oMLX at {omlx_url}'})}\n\n"

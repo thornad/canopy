@@ -2626,6 +2626,7 @@
                 this.thinkingState = { isInThinking: false, startTime: null };
                 this._firstTokenReceived = false;
                 this._streamError = null;
+                this._toolLimit = null;
                 this._prefillStartTime = Date.now();
 
                 // Estimate prompt tokens from active path
@@ -2706,6 +2707,13 @@
                                     continue;
                                 }
                                 if (data.type === 'tool_result') {
+                                    continue;
+                                }
+                                // Server ran out of tool-call turns. Nothing is
+                                // lost — handled in finally, where the user is
+                                // asked whether to keep going.
+                                if (data.type === 'tool_limit') {
+                                    this._toolLimit = data;
                                     continue;
                                 }
 
@@ -2844,6 +2852,18 @@
                         this._reloadFocusId = null;
                         await this.reloadCurrentConversation(fid);
                     }
+                    // Tool-call budget exhausted: show the saved chain, then
+                    // offer another round that resumes from its last tool row.
+                    const limit = this._toolLimit;
+                    this._toolLimit = null;
+                    let resumeFrom = null;
+                    if (limit?.parent_id && this.currentConversationId === convId) {
+                        await this.reloadCurrentConversation(limit.parent_id);
+                        const turns = limit.turns || 10;
+                        if (confirm(`The model used ${turns} tool-calling turns without finishing.\n\nContinue for another ${turns}?`)) {
+                            resumeFrom = limit.parent_id;
+                        }
+                    }
                     this.$nextTick(() => lucide.createIcons());
                     this.pollOmlxStats(); // refresh stats after each response
                     // Cache just grew — update the active branch's dot and
@@ -2852,6 +2872,7 @@
                     this.loadTreeCacheStatus();
                     // Also refresh conversations list so updated_at bumps.
                     this.loadConversations();
+                    if (resumeFrom) await this.streamResponse(resumeFrom);
                 }
             },
 
