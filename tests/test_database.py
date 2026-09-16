@@ -234,3 +234,53 @@ class TestActivePath:
         from canopy.server import _compute_active_path
 
         assert _compute_active_path([]) == []
+
+
+# --- MCP sync from mcp.json ---
+
+
+class TestMcpJsonSync:
+    @staticmethod
+    def _write(tmp_path, servers):
+        import json
+
+        path = tmp_path / "mcp.json"
+        path.write_text(json.dumps({"mcpServers": servers}))
+        return path
+
+    @staticmethod
+    async def _enabled():
+        return {s["name"]: bool(s["enabled"]) for s in await db.list_mcp_servers()}
+
+    async def test_new_servers_start_disabled(self, tmp_path):
+        await db.sync_mcp_from_json(self._write(tmp_path, {"a": {"command": "x"}}))
+        assert await self._enabled() == {"a": False}
+
+    async def test_ui_toggle_survives_resync(self, tmp_path):
+        path = self._write(tmp_path, {"a": {"command": "x"}, "b": {"command": "y"}})
+        await db.sync_mcp_from_json(path)
+        a = next(s for s in await db.list_mcp_servers() if s["name"] == "a")
+        await db.update_mcp_server(a["id"], enabled=True)
+
+        stats = await db.sync_mcp_from_json(path)  # next server start
+
+        assert await self._enabled() == {"a": True, "b": False}
+        assert stats["updated"] == 0
+
+    async def test_explicit_flags_in_file_win(self, tmp_path):
+        path = self._write(tmp_path, {"a": {"command": "x"}, "b": {"command": "y"}})
+        await db.sync_mcp_from_json(path)
+        for s in await db.list_mcp_servers():
+            await db.update_mcp_server(s["id"], enabled=(s["name"] == "a"))
+
+        await db.sync_mcp_from_json(self._write(tmp_path, {
+            "a": {"command": "x", "disabled": True},
+            "b": {"command": "y", "enabled": True},
+        }))
+
+        assert await self._enabled() == {"a": False, "b": True}
+
+    async def test_servers_missing_from_file_are_removed(self, tmp_path):
+        await db.sync_mcp_from_json(self._write(tmp_path, {"a": {"command": "x"}, "b": {"command": "y"}}))
+        await db.sync_mcp_from_json(self._write(tmp_path, {"a": {"command": "x"}}))
+        assert await self._enabled() == {"a": False}

@@ -604,8 +604,11 @@ async def delete_mcp_server(server_id: str) -> bool:
 async def sync_mcp_from_json(path: Path) -> dict:
     """Mirror an LM Studio / Claude Desktop style mcp.json into the mcp_servers table.
 
-    JSON is authoritative: servers in the file are inserted/updated; servers in
-    the DB whose name is not in the file are deleted. Returns counts.
+    JSON is authoritative for which servers exist and how they run: servers in
+    the file are inserted/updated; servers in the DB whose name is not in the
+    file are deleted. Enabled state is only taken from the file when it says
+    so (``enabled`` / ``disabled``); otherwise the toggle set in the UI is
+    kept, and new servers start disabled. Returns counts.
     """
     data = json.loads(path.read_text())
     spec = (data.get("mcpServers") or data.get("servers") or {})
@@ -622,11 +625,16 @@ async def sync_mcp_from_json(path: Path) -> dict:
         desired.add(name)
         args = list(conf.get("args") or [])
         env = dict(conf.get("env") or {})
-        enabled = bool(conf.get("enabled", False))
+        cur = existing.get(name)
+        # Most mcp.json files carry no enabled flag. Treating that as "off"
+        # would reset the user's UI toggles on every server restart.
         if conf.get("disabled") is True:
             enabled = False
+        elif "enabled" in conf:
+            enabled = bool(conf["enabled"])
+        else:
+            enabled = cur["enabled"] if cur is not None else False
 
-        cur = existing.get(name)
         if cur is None:
             await add_mcp_server(name=name, command=command, args=args, env=env, enabled=enabled)
             added += 1
