@@ -1558,6 +1558,7 @@
                 setInterval(() => this.checkServerVersion(), 30000);
                 window.addEventListener('focus', () => this.checkServerVersion());
                 this._registerTreeNav();
+                this.$watch('currentModel', id => this._rememberModel(id));
 
                 this.$watch('activePath', () => {
                     this.$nextTick(() => lucide.createIcons());
@@ -1769,6 +1770,7 @@
                         const data = await modelsResp.json();
                         this.availableModels = data.data || [];
                         this.backendReachable = true;
+                        this._restoreModelAfterReload();
                         // Deliberately NO auto-select: the user picks the
                         // model explicitly (or confirms the chat's last-used
                         // model at send time). See sendMessage().
@@ -1802,6 +1804,29 @@
             },
 
             selectModel(id) { this.currentModel = id; },
+
+            // A reload (e.g. from the update banner) shouldn't cost the user
+            // their model pick. sessionStorage survives reloads of this tab
+            // only, so a fresh tab or app launch still starts unselected, as
+            // intended by loadModels(). Stored with its backend so a pick
+            // never leaks across oMLX/DS4.
+            _rememberModel(id) {
+                try {
+                    if (id) sessionStorage.setItem('canopy-model', JSON.stringify({ backend: this.activeBackend, id }));
+                    else sessionStorage.removeItem('canopy-model');
+                } catch (e) { /* storage unavailable — nothing to remember */ }
+            },
+
+            _restoreModelAfterReload() {
+                if (this.currentModel) return;
+                try {
+                    const saved = JSON.parse(sessionStorage.getItem('canopy-model') || 'null');
+                    if (saved?.backend === this.activeBackend
+                        && this.availableModels.some(m => m.id === saved.id)) {
+                        this.currentModel = saved.id;
+                    }
+                } catch (e) { /* ignore */ }
+            },
 
             _promptModelChoice(historical, current) {
                 // Returns a promise that resolves to 'historical' | 'current' | 'cancel'
