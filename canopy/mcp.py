@@ -309,6 +309,10 @@ class MCPRegistry:
                     reason = str(e) or type(e).__name__
                     status[name] = f"error: {reason}"
                     log.warning("MCP %s failed to start: %s", name, reason)
+            # Re-enabling a server re-inserts it at the end of the dict, which
+            # would reorder tool_specs() and bust the prompt cache (tools are
+            # part of the cached prefix). Pin the order to the config order.
+            self._clients = {n: self._clients[n] for n in wanted if n in self._clients}
         return status
 
     @staticmethod
@@ -326,12 +330,16 @@ class MCPRegistry:
             self._clients.clear()
 
     def tool_specs(self) -> list[dict]:
-        """Return OpenAI-compatible tool specs for all running servers."""
+        """Return OpenAI-compatible tool specs for all running servers.
+
+        Order must be deterministic: the specs are rendered into the prompt
+        prefix, so any reordering invalidates the backend's prompt cache.
+        """
         specs = []
         for client in self._clients.values():
             if not client.running:
                 continue
-            for tool in client.tools:
+            for tool in sorted(client.tools, key=lambda t: t["name"]):
                 specs.append(
                     {
                         "type": "function",
