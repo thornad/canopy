@@ -1525,8 +1525,7 @@
                 }
                 this.applyTheme();
                 this.setupScrollListener();
-                this.pollOmlxStats();
-                setInterval(() => this.pollOmlxStats(), 15000);
+                this.loadOmlxStats();
                 setInterval(() => this.checkServerVersion(), 30000);
                 window.addEventListener('focus', () => this.checkServerVersion());
                 this._registerTreeNav();
@@ -1581,7 +1580,7 @@
                 this.modelContextWindows = {};
                 this.omlxStats = { cache_efficiency: null, avg_generation_tps: 0 };
                 await this.loadModels();
-                if (this.activeBackend === 'omlx') this.pollOmlxStats();
+                if (this.activeBackend === 'omlx') this.loadOmlxStats();
             },
 
             async saveSettings() {
@@ -1907,7 +1906,7 @@
                 } catch (e) { /* server restarting — try again next tick */ }
             },
 
-            async pollOmlxStats() {
+            async loadOmlxStats() {
                 if (this.activeBackend !== 'omlx') return;  // oMLX-only
                 try {
                     const resp = await fetch('/api/omlx-stats');
@@ -2730,7 +2729,7 @@
                         }
                     }
                     this.$nextTick(() => lucide.createIcons());
-                    this.pollOmlxStats(); // refresh stats after each response
+                    this.loadOmlxStats(); // refresh stats after each response
                     // Also refresh conversations list so updated_at bumps.
                     this.loadConversations();
                     if (resumeFrom) await this.streamResponse(resumeFrom);
