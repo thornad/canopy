@@ -3,13 +3,10 @@
 **Cache-aware branching chat client for [oMLX](https://github.com/jundot/omlx).**
 
 Canopy is a macOS menubar + web chat client designed around the way oMLX caches
-prompts. Every turn, every branch, every regenerate — you can see at a glance
-whether the prefill will hit the SSD cache or pay the full cost. Branching is
-cheap because the shared prefix stays cached, and Canopy's tree view makes that
-tangible instead of abstract.
+prompts. Branching is cheap because the shared prefix stays cached, and Canopy's
+tree view makes that tangible instead of abstract.
 
-> Built for local oMLX development. Pairs with oMLX ≥ 0.3.5.dev2 (requires the
-> `/admin/api/cache/probe` endpoint).
+> Built for local oMLX development. Pairs with oMLX ≥ 0.3.5.dev2.
 
 ![Canopy UI](docs/images/canopy-ui.jpg)
 
@@ -18,15 +15,9 @@ tangible instead of abstract.
 - **Prompt-tree conversations** — every send, regenerate, or edit creates a
   branch. Navigate them in a live tree panel that mirrors the underlying
   message graph.
-- **Per-node cache visibility** — each node in the tree shows a cache dot:
-  blue if its prefix is retrievable from oMLX's SSD cache, hollow if it
-  would require a full prefill. Hover for a block/token breakdown.
 - **Cache-aware branching** — a new branch inherits the cached prefix up to
   the fork point for free. Canopy makes that obvious so you can branch
   aggressively without fear of expensive prefills.
-- **Model-aware probing** — cache hashes are per-model. Switching models in
-  the dropdown re-probes every chat so the dots reflect *what would be
-  cached if you sent right now with this model*.
 - **No surprise auto-loads** — Canopy never picks a model for you on
   startup. On send, it asks whether to load the chat's last-used model.
 - **Branches and chats with timestamps** — sidebar entries and tree nodes
@@ -105,23 +96,10 @@ don't also run oMLX there). Canopy talks to exactly the URL you configure — it
 does not scan ports — and shows **"DS4 unreachable"** in the model selector if
 nothing answers.
 
-oMLX-only features (the cache dots, the context-window meter, and cache stats)
+oMLX-only features (the context-window meter and cache stats)
 are hidden while DS4 is active, since DS4 doesn't expose oMLX's admin endpoints.
 
-## The cache dots — what they mean
-
-Every tree node and every sidebar entry has a small colored dot next to it:
-
-| Dot | Meaning |
-|-----|---------|
-| 🔵 Solid blue | Prefix is retrievable from oMLX's SSD cache — prefill will be fast |
-| ⚪ Hollow | Not in the cache — full prefill cost |
-
-Hover for the exact breakdown: `X/Y blocks cached (Z tokens)`. The dots
-re-probe automatically when you load a chat, send a message, switch
-branches, or change the model dropdown.
-
-### When is something "cached"?
+## When is something "cached"?
 
 oMLX hashes the prompt into fixed-size blocks (default 256 tokens) using a
 chain hash: each block's hash depends on the previous block plus the model
@@ -133,8 +111,8 @@ This has two useful implications in Canopy:
 1. **Branching is cheap.** A new branch shares the entire prefix up to the
    fork point with the old branch, so the cached portion is reused 1:1.
 2. **Model switching invalidates everything.** The model name is part of
-   every block hash, so switching models drops the cache tier for every
-   chat back to hollow until you build it up again.
+   every block hash, so switching models means a full prefill for every
+   chat until you build the cache up again.
 
 ## Branching
 
@@ -158,14 +136,6 @@ This has two useful implications in Canopy:
 - [oMLX](https://github.com/jundot/omlx) ≥ 0.3.5.dev2 running locally
 
 ## Troubleshooting
-
-**Dots are all hollow even for chats I just sent.** Your oMLX is older
-than 0.3.5.dev2 and doesn't have the `/admin/api/cache/probe` endpoint.
-Update oMLX or the probe will silently no-op.
-
-**Dots stay "cached" after I cleared the oMLX cache.** Fixed in oMLX
-≥ 0.3.5.dev2 — earlier builds used a different cache tier that survived
-manual clears, giving stale results.
 
 **Chat creation fails with "unhashable type: 'dict'".** Starlette /
 Jinja2 version mismatch in an older Canopy build. Update to the latest

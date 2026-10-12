@@ -247,31 +247,6 @@
         .ctx-menu .ctx-danger { color: var(--danger); }
         .ctx-menu .ctx-danger:hover { background: var(--danger-bg); }
 
-        /* Per-chat / per-node cache dot, graded by how much of the prefix is
-           cached: solid = walks straight in, half = real head start, outline
-           = only the shared head, hollow = nothing. Hover tooltip shows the
-           percentage and block counts. */
-        .cache-dot {
-            width: 8px; height: 8px; border-radius: 50%;
-            flex-shrink: 0;
-            display: inline-block;
-            background: transparent;
-            box-shadow: inset 0 0 0 1px var(--border-faint);
-        }
-        .cache-dot.cache-cached    { background: #3b82f6; box-shadow: none; }
-        /* Mostly-cold: the shared head (system prompt + tool definitions) is
-           cached, but this branch's own content still needs prefill. */
-        .cache-dot.cache-cold      {
-            background: transparent;
-            box-shadow: inset 0 0 0 1.5px #3b82f6; opacity: 0.45;
-        }
-        /* Part-way: a real chunk of this prefix is cached, but not all. */
-        .cache-dot.cache-partial   {
-            background: linear-gradient(90deg, #3b82f6 50%, transparent 50%);
-            box-shadow: inset 0 0 0 1px #3b82f6;
-        }
-        .cache-dot.cache-unknown   { background: transparent; }
-
         .sidebar-footer {
             padding: 8px; border-top: 1px solid var(--border-faint);
         }
@@ -655,9 +630,6 @@
             flex-shrink: 0;
             display: flex; align-items: center; gap: 4px;
         }
-        .tree-node .node-meta .cache-dot {
-            width: 5px; height: 5px;
-        }
         .tree-node .node-time {
             font-size: 8px; color: var(--text-muted);
             overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
@@ -782,9 +754,6 @@
                                           x-text="formatRelativeTime(conv.updated_at)"
                                           :title="formatAbsoluteTime(conv.updated_at)"></span>
                                 </div>
-                                <span class="cache-dot" x-show="activeBackend === 'omlx'"
-                                      :class="'cache-' + cacheTierFor(conv.id)"
-                                      :title="cacheTitleFor(conv.id)"></span>
                                 <button class="delete-btn" @click.stop="deleteConversation(conv.id)"
                                         title="Delete">
                                     <i data-lucide="trash-2" style="width:12px;height:12px;"></i>
@@ -806,9 +775,6 @@
                               x-text="formatRelativeTime(conv.updated_at)"
                               :title="formatAbsoluteTime(conv.updated_at)"></span>
                     </div>
-                    <span class="cache-dot" x-show="activeBackend === 'omlx'"
-                          :class="'cache-' + cacheTierFor(conv.id)"
-                          :title="cacheTitleFor(conv.id)"></span>
                     <button class="delete-btn" @click.stop="deleteConversation(conv.id)"
                             title="Delete">
                         <i data-lucide="trash-2" style="width:12px;height:12px;"></i>
@@ -1506,12 +1472,6 @@
             // oMLX stats
             omlxStats: { cache_efficiency: null, avg_generation_tps: 0 },
             modelContextWindows: {},  // modelId → max_context_window
-            // Per-conversation cache status (conversation_id → probe result)
-            cacheStatusMap: {},
-            // Per-message cache status for the active conversation's tree
-            // (message_id → probe result). Rebuilt when the chat changes
-            // and refreshed after streaming completes.
-            treeCacheMap: {},
 
             // Input
             inputText: '',
@@ -1563,12 +1523,10 @@
                 if (this.conversations.length > 0) {
                     await this.loadConversation(this.conversations[0].id);
                 }
-                await this.loadCacheStatus();
                 this.applyTheme();
                 this.setupScrollListener();
                 this.pollOmlxStats();
                 setInterval(() => this.pollOmlxStats(), 15000);
-                setInterval(() => this.loadCacheStatus(), 20000);
                 setInterval(() => this.checkServerVersion(), 30000);
                 window.addEventListener('focus', () => this.checkServerVersion());
                 this._registerTreeNav();
@@ -1588,14 +1546,6 @@
                 });
                 this.$watch('contextMenu.open', () => {
                     this.$nextTick(() => lucide.createIcons());
-                });
-                // Cache hashes are per-model, so re-probe everything when
-                // the user changes the model dropdown — otherwise the dots
-                // would still reflect the previous model's cache state.
-                this.$watch('currentModel', () => {
-                    this.loadCacheStatus();
-                    this.probeActiveBranch();
-                    this.loadTreeCacheStatus();
                 });
             },
 
@@ -1630,12 +1580,8 @@
                 this.currentModel = null;
                 this.modelContextWindows = {};
                 this.omlxStats = { cache_efficiency: null, avg_generation_tps: 0 };
-                this.cacheStatusMap = {};
                 await this.loadModels();
-                if (this.activeBackend === 'omlx') {
-                    this.loadCacheStatus();
-                    this.pollOmlxStats();
-                }
+                if (this.activeBackend === 'omlx') this.pollOmlxStats();
             },
 
             async saveSettings() {
@@ -1981,126 +1927,6 @@
                 } catch (e) { console.error('Failed to load conversations:', e); }
             },
 
-            // --- Cache status ---
-            _modelOverrideParam() {
-                // Append ``&model=...`` so probes reflect the currently
-                // selected model instead of the chat's historical one.
-                // Cache hashes are per-model — switching models invalidates
-                // everything we're showing.
-                return this.currentModel
-                    ? `&model=${encodeURIComponent(this.currentModel)}`
-                    : '';
-            },
-
-            async loadCacheStatus() {
-                if (this.activeBackend !== 'omlx') return;  // cache dots are oMLX-only
-                // Best-effort probe of all conversations' cache state. Fails
-                // silently when oMLX is unreachable or the model isn't loaded.
-                try {
-                    const override = this.currentModel
-                        ? `?model=${encodeURIComponent(this.currentModel)}`
-                        : '';
-                    const resp = await fetch('/api/cache-status' + override);
-                    if (resp.ok) {
-                        const data = await resp.json();
-                        // Merge instead of replace so the per-branch probe
-                        // for the active chat isn't clobbered by the bulk
-                        // (latest-leaf) probe.
-                        for (const [k, v] of Object.entries(data)) {
-                            if (k.startsWith('_')) continue;
-                            // "skipped": probing paused during generation
-                            // and nothing known yet — keep the current dot.
-                            if (v?.status === 'skipped') continue;
-                            this.cacheStatusMap[k] = v;
-                        }
-                    }
-                } catch (e) { /* probe is best-effort */ }
-            },
-
-            async probeActiveBranch() {
-                if (this.activeBackend !== 'omlx') return;  // oMLX-only
-                // Probe the currently selected branch (activePath tip), so
-                // the sidebar dot on the active chat reflects the user's
-                // actual view rather than the DB's newest leaf.
-                if (!this.currentConversationId || this.activePath.length === 0) return;
-                const tip = this.activePath[this.activePath.length - 1];
-                try {
-                    const url = `/api/conversations/${this.currentConversationId}`
-                              + `/cache-probe?leaf_id=${encodeURIComponent(tip.id)}`
-                              + this._modelOverrideParam();
-                    const resp = await fetch(url);
-                    if (resp.ok) {
-                        const data = await resp.json();
-                        if (data?.status !== 'skipped') {
-                            this.cacheStatusMap[this.currentConversationId] = data;
-                        }
-                    }
-                } catch (e) { /* best-effort */ }
-            },
-
-            async loadTreeCacheStatus() {
-                if (this.activeBackend !== 'omlx') { this.treeCacheMap = {}; return; }  // oMLX-only
-                // Per-node cache probes for the current conversation's tree.
-                // Each node is a potential "tip" with its own unique prefix
-                // — so the dot next to each node answers "what's cached if
-                // I continued from here". One batch request to amortize the
-                // oMLX login across all nodes.
-                if (!this.currentConversationId) return;
-                // Only nodes the tree renders get a dot. Probing hidden rows
-                // (answers, tool plumbing) made oMLX tokenize the whole chat
-                // once per message for dots nobody sees.
-                const ids = Object.values(this.messageTree)
-                    .filter(m => !this._isHiddenMessage(m))
-                    .map(m => m.id);
-                if (ids.length === 0) { this.treeCacheMap = {}; return; }
-                try {
-                    const resp = await fetch(
-                        `/api/conversations/${this.currentConversationId}/cache-probe-batch`,
-                        {
-                            method: 'POST',
-                            headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify({
-                                message_ids: ids,
-                                model: this.currentModel || undefined,
-                            }),
-                        },
-                    );
-                    if (!resp.ok) return;
-                    const data = await resp.json();
-                    if (data && !data._error) {
-                        const merged = {};
-                        for (const [k, v] of Object.entries(data)) {
-                            merged[k] = v?.status === 'skipped' ? this.treeCacheMap[k] : v;
-                        }
-                        this.treeCacheMap = merged;
-                        // Re-render tree if currently visible (x-effect
-                        // won't fire on a plain map mutation).
-                        if (this.treeOpen && this.$refs.treeContainer) {
-                            this.$refs.treeContainer.innerHTML = this.renderTree();
-                            this.$nextTick(() => lucide.createIcons());
-                        }
-                    }
-                } catch (e) { /* best-effort */ }
-            },
-
-            nodeCacheTier(msgId) {
-                return this._cacheTier(this.treeCacheMap[msgId]);
-            },
-
-            nodeCacheTitle(msgId) {
-                const s = this.treeCacheMap[msgId];
-                if (!s) return '';
-                if (s.status === 'no_model') return 'No model set';
-                if (s.status === 'empty') return 'No prefix';
-                if (s.status === 'error') return 'Probe failed';
-                if (!s.model_loaded) return 'Model not loaded';
-                const total = s.total_blocks || 0;
-                const cached = (s.blocks_ssd_hot || 0)
-                             + (s.blocks_ssd_disk || 0);
-                const pct = total ? Math.round((cached / total) * 100) : 0;
-                return `${pct}% cached (${cached}/${total} blocks · ${s.total_tokens} tokens)`;
-            },
-
             // --- Time formatting ---
             formatRelativeTime(ts) {
                 // Human-friendly relative time for sidebar / tree nodes.
@@ -2121,45 +1947,6 @@
                 if (!ts) return '';
                 const d = new Date(ts * 1000);
                 return d.toLocaleString();
-            },
-
-            cacheTierFor(convId) {
-                return this._cacheTier(this.cacheStatusMap[convId]);
-            },
-
-            // How much of this prefix would actually be skipped at prefill.
-            //
-            // Deliberately not "has at least one cached block": every chat on
-            // a model shares the same leading blocks (system prompt + tool
-            // definitions), so the moment any one generation runs, that head
-            // is cached and a boolean paints every chat and every root node
-            // solid blue — including ones that would re-prefill almost
-            // everything. Grade by coverage so the dot answers the question
-            // it appears to answer.
-            _cacheTier(s) {
-                if (!s || s.status !== 'ok' || !s.model_loaded) return 'unknown';
-                const total = s.total_blocks || 0;
-                const cached = (s.blocks_ssd_hot || 0)
-                             + (s.blocks_ssd_disk || 0);
-                if (!total || cached === 0) return 'unknown';
-                const fraction = cached / total;
-                if (fraction >= 0.9) return 'cached';    // solid — walks straight in
-                if (fraction >= 0.25) return 'partial';  // half — real head start
-                return 'cold';                           // outline — shared head only
-            },
-
-            cacheTitleFor(convId) {
-                const s = this.cacheStatusMap[convId];
-                if (!s) return '';
-                if (s.status === 'no_model') return 'No model set for this chat';
-                if (s.status === 'empty') return 'Empty chat';
-                if (s.status === 'error') return 'Cache probe failed';
-                if (!s.model_loaded) return 'Model not loaded — load it to probe cache';
-                const total = s.total_blocks || 0;
-                const cached = (s.blocks_ssd_hot || 0)
-                             + (s.blocks_ssd_disk || 0);
-                const pct = total ? Math.round((cached / total) * 100) : 0;
-                return `Cache: ${pct}% cached (${cached}/${total} blocks · ${s.total_tokens} tokens)`;
             },
 
             async newChat() {
@@ -2231,13 +2018,6 @@
                     this.computeActivePath();
                 } catch (e) { console.error('Failed to load conversation:', e); }
                 this.sidebarOpen = window.innerWidth >= 768;
-                // Probe the actual active branch (not the DB newest leaf)
-                // so the sidebar dot reflects what the user is viewing.
-                this.probeActiveBranch();
-                // Probe every node in the tree so each one shows its own
-                // cache dot — each node has a unique prefix so cache tier
-                // can differ at every point in the tree.
-                this.loadTreeCacheStatus();
             },
 
             async deleteConversation(id) {
@@ -2481,16 +2261,11 @@
                 const hasBranch = childCount > 1;
                 const relTime = this.formatRelativeTime(msg.created_at);
                 const absTime = this.formatAbsoluteTime(msg.created_at);
-                const cacheTier = this.nodeCacheTier(msg.id);
-                const cacheTitle = this.nodeCacheTitle(msg.id);
 
                 let html = `<div class="tree-node role-${isUser ? 'user' : 'assistant'} ${isActive ? 'active' : ''}" onclick="window._canopyTreeNav('${msg.id}')">`;
                 html += `<div class="node-body">`;
                 html += `  <div class="node-text" title="${this._escHtml(preview)}">${previewHtml}</div>`;
                 const metaParts = [];
-                if (this.activeBackend === 'omlx') {  // cache dots are oMLX-only
-                    metaParts.push(`<span class="cache-dot cache-${cacheTier}" title="${this._escHtml(cacheTitle)}"></span>`);
-                }
                 if (relTime) {
                     metaParts.push(`<span class="node-time" title="${this._escHtml(absTime)}">${this._escHtml(relTime)}</span>`);
                 }
@@ -2513,7 +2288,6 @@
 
             treeNavigate(msgId) {
                 this.computeActivePath(msgId);
-                this.probeActiveBranch();
                 this.$nextTick(() => {
                     lucide.createIcons();
                     // Find the message by data attribute and scroll to its top
@@ -2957,10 +2731,6 @@
                     }
                     this.$nextTick(() => lucide.createIcons());
                     this.pollOmlxStats(); // refresh stats after each response
-                    // Cache just grew — update the active branch's dot and
-                    // re-probe all tree nodes since new nodes were added.
-                    this.probeActiveBranch();
-                    this.loadTreeCacheStatus();
                     // Also refresh conversations list so updated_at bumps.
                     this.loadConversations();
                     if (resumeFrom) await this.streamResponse(resumeFrom);
@@ -3072,14 +2842,13 @@
 
             _pruneSubtree(msgId) {
                 // Depth-first so descendants of a deleted node don't linger as
-                // orphans in messageTree and skew branch counts / cache probes.
+                // orphans in messageTree and skew branch counts.
                 for (const childId of (this.childrenMap[msgId] || [])) {
                     this._pruneSubtree(childId);
                 }
                 delete this.childrenMap[msgId];
                 delete this.messageTree[msgId];
                 delete this.branchSelections[msgId];
-                delete this.treeCacheMap[msgId];
             },
 
             branchFromMessage(msg) {

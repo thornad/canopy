@@ -3,7 +3,6 @@
 import asyncio
 import json
 import re
-import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Optional
@@ -367,7 +366,7 @@ def _path_to_openai_messages(
     """Rebuild an OpenAI-style messages array from a DB path.
 
     Handles tool rows (``role='tool'``) and assistant rows that carry
-    ``tool_calls`` so probes and chat requests replay the exact sequence
+    ``tool_calls`` so chat requests replay the exact sequence
     oMLX saw originally — otherwise the cache hashes diverge after any
     tool-calling turn.
 
@@ -421,32 +420,6 @@ def _path_to_openai_messages(
                 pass
         out.append(entry)
     return out
-
-
-# Cache probes make oMLX render and tokenize a whole conversation, synchronously
-# on its event loop. With tool-heavy chats that is seconds per sweep, which
-# stalls token streaming. So probes pause while Canopy is generating and never
-# run concurrently; a paused probe answers with its last known result.
-_active_generations = 0
-_generation_epoch = 0
-_probe_lock = asyncio.Lock()
-_sweep_lock = asyncio.Lock()
-_last_probe: dict[tuple, dict] = {}
-_last_sweep: dict[Optional[str], tuple[float, dict]] = {}
-SWEEP_REUSE_SECONDS = 15.0
-
-
-async def _track_generation(stream):
-    """Mark a chat stream as generating for as long as it is being consumed."""
-    global _active_generations, _generation_epoch
-    _active_generations += 1
-    _generation_epoch += 1
-    try:
-        async for chunk in stream:
-            yield chunk
-    finally:
-        _active_generations -= 1
-        await stream.aclose()
 
 
 def _omit_earlier_tool_results(settings: dict) -> bool:
@@ -525,7 +498,7 @@ async def _generate_with_tools(
     final_content = ""
     usage_total = UsageTotals()
     # Walk the parent chain as we save each intermediate turn so a future
-    # probe / next send replays the exact sequence oMLX just cached.
+    # next send replays the exact sequence oMLX just cached.
     current_parent = body.parent_id
 
     try:
@@ -737,9 +710,7 @@ async def chat_proxy(body: ChatRequest):
 
     if tool_specs:
         return StreamingResponse(
-            _track_generation(
-                _generate_with_tools(body, messages, tool_specs, omlx_url, headers)
-            ),
+            _generate_with_tools(body, messages, tool_specs, omlx_url, headers),
             media_type="text/event-stream",
         )
 
@@ -823,7 +794,7 @@ async def chat_proxy(body: ChatRequest):
             }
             yield f"data: {json.dumps(done_event)}\n\n"
 
-    return StreamingResponse(_track_generation(generate()), media_type="text/event-stream")
+    return StreamingResponse(generate(), media_type="text/event-stream")
 
 
 # --- Models proxy ---
@@ -937,247 +908,6 @@ async def omlx_stats():
             return {"error": "Stats unavailable"}
     except Exception as e:
         return {"error": str(e)}
-
-
-async def _probe_leaf_cache(
-    conv: dict, leaf_id: str, *, client: Optional[httpx.AsyncClient] = None,
-    cookies: Optional[httpx.Cookies] = None,
-    model_override: Optional[str] = None,
-) -> dict:
-    """Probe cache state for a specific leaf (message tip) in a conversation.
-
-    Cache status is per-branch, not per-conversation: each leaf walks a unique
-    path from the root and therefore has its own tokenization and cache hash
-    sequence. Callers that already hold an auth cookie (e.g. the bulk
-    endpoint) can pass ``client`` and ``cookies`` to avoid re-logging in for
-    every probe.
-
-    When ``model_override`` is provided, the probe uses that model (and thus
-    its hashes) instead of the conversation's historical model. This is how
-    the UI shows "what would be cached if I sent this with my currently
-    selected model" — cache hashes are per-model, so switching models in
-    the dropdown invalidates the visible cache state until re-probed.
-    """
-    settings = await db.get_settings()
-    _backend = _active_backend(settings)
-    if _backend["type"] != "omlx":
-        return {"status": "unavailable", "leaf_id": leaf_id}  # cache probe is oMLX-only
-    omlx_url = _backend["url"]
-    api_key = _backend["key"]
-
-    path = await db.get_message_path(leaf_id)
-    if not path:
-        return {"status": "empty", "leaf_id": leaf_id}
-
-    if model_override:
-        model = model_override
-    else:
-        # Resolve the model from the conversation / message tags. Older
-        # conversations may not have ``conv.model`` set — fall back to
-        # whatever model tagged the most recent message in the path so
-        # the probe still works.
-        model = conv.get("model") or ""
-        if not model:
-            for msg in reversed(path):
-                if msg.get("model"):
-                    model = msg["model"]
-                    break
-    if not model:
-        return {"status": "no_model", "leaf_id": leaf_id}
-
-    # Rebuild OAI-formatted messages (same path the chat proxy uses so the
-    # hashes line up with what the scheduler would actually see at prefill).
-    system_prompt = settings.get("system_prompt", "")
-    messages: list[dict] = []
-    if system_prompt:
-        messages.append({"role": "system", "content": system_prompt})
-    messages.extend(
-        _path_to_openai_messages(
-            path, omit_earlier_tool_results=_omit_earlier_tool_results(settings)
-        )
-    )
-
-    # oMLX v0.3.6+ includes ``tools`` in the chat-template hash, so a probe
-    # that omits them won't match the cache entries written by a real chat
-    # turn that *did* pass tools. Mirror what /api/chat sends so the dots
-    # reflect the actual prefill path.
-    probe_tools = mcp_registry.tool_specs() or None
-
-    async def _send(c: httpx.AsyncClient, ck: httpx.Cookies) -> dict:
-        body: dict = {"model_id": model, "messages": messages}
-        if probe_tools:
-            body["tools"] = probe_tools
-        resp = await c.post(
-            f"{omlx_url}/admin/api/cache/probe",
-            cookies=ck,
-            json=body,
-        )
-        if resp.status_code != 200:
-            return {"status": "error", "detail": resp.text, "leaf_id": leaf_id}
-        return {"status": "ok", "leaf_id": leaf_id, **resp.json()}
-
-    key = (leaf_id, model)
-
-    def _paused() -> dict:
-        return _last_probe.get(key) or {"status": "skipped", "leaf_id": leaf_id}
-
-    if _active_generations:
-        return _paused()
-    async with _probe_lock:
-        # A generation may have started while we waited for the lock.
-        if _active_generations:
-            return _paused()
-        try:
-            if client is not None and cookies is not None:
-                result = await _send(client, cookies)
-            else:
-                async with httpx.AsyncClient(timeout=10.0) as c:
-                    login_resp = await c.post(
-                        f"{omlx_url}/admin/api/login",
-                        json={"api_key": api_key},
-                    )
-                    result = await _send(c, login_resp.cookies)
-        except Exception as e:
-            return {"status": "error", "detail": str(e), "leaf_id": leaf_id}
-    if result.get("status") == "ok":
-        _last_probe[key] = result
-    return result
-
-
-@app.get("/api/conversations/{conv_id}/cache-probe")
-async def cache_probe(
-    conv_id: str,
-    leaf_id: Optional[str] = None,
-    model: Optional[str] = None,
-):
-    """Probe cache status for one conversation's active tip.
-
-    ``leaf_id`` picks a specific branch; ``model`` overrides the chat's
-    historical model so the UI can reflect "cache status if I sent this
-    with my currently selected model" (hashes are per-model).
-    """
-    conv = await db.get_conversation(conv_id)
-    if conv is None:
-        raise HTTPException(404, "Conversation not found")
-
-    if leaf_id is None:
-        latest = await db.get_latest_leaf(conv_id)
-        if latest is None:
-            return {"status": "empty"}
-        leaf_id = latest["id"]
-
-    return await _probe_leaf_cache(conv, leaf_id, model_override=model)
-
-
-@app.post("/api/conversations/{conv_id}/cache-probe-batch")
-async def cache_probe_batch(conv_id: str, body: dict):
-    """Probe cache status for many message tips in one conversation.
-
-    Used by the tree view to render a cache dot on every node — each node
-    is treated as a potential tip, so the dot reflects "what's cached if I
-    were at this point in the branch". Reuses a single oMLX auth cookie
-    across all probes to keep the round-trip cost bounded for large trees.
-
-    Body: ``{"message_ids": [...], "model": "optional-override"}``.
-    """
-    conv = await db.get_conversation(conv_id)
-    if conv is None:
-        raise HTTPException(404, "Conversation not found")
-
-    message_ids = body.get("message_ids") or []
-    model_override = body.get("model")
-    if not isinstance(message_ids, list):
-        raise HTTPException(400, "message_ids must be a list")
-    if not message_ids:
-        return {}
-
-    settings = await db.get_settings()
-    _backend = _active_backend(settings)
-    if _backend["type"] != "omlx":
-        return {}  # per-node cache probes are oMLX-only
-    omlx_url = _backend["url"]
-    api_key = _backend["key"]
-
-    results: dict = {}
-    try:
-        async with httpx.AsyncClient(timeout=60.0) as client:
-            login_resp = await client.post(
-                f"{omlx_url}/admin/api/login",
-                json={"api_key": api_key},
-            )
-            cookies = login_resp.cookies
-            for msg_id in message_ids:
-                try:
-                    results[msg_id] = await _probe_leaf_cache(
-                        conv, msg_id, client=client, cookies=cookies,
-                        model_override=model_override,
-                    )
-                except Exception as e:
-                    results[msg_id] = {"status": "error", "detail": str(e)}
-    except Exception as e:
-        return {"_error": str(e)}
-    return results
-
-
-@app.get("/api/cache-status")
-async def cache_status_all(model: Optional[str] = None):
-    """Probe cache status for every conversation (best-effort).
-
-    Returns a map of conversation_id → probe result for the *latest* leaf in
-    each chat, so the sidebar can show at-a-glance cache state for all chats
-    without N round-trips from the UI. The UI can still probe a specific
-    branch via ``/api/conversations/{id}/cache-probe?leaf_id=...``.
-
-    When ``model`` is set, every probe uses that model override (for "what
-    would be cached if I switched to this model and sent?").
-    """
-    settings = await db.get_settings()
-    _backend = _active_backend(settings)
-    if _backend["type"] != "omlx":
-        return {}  # cache dots are oMLX-only
-    omlx_url = _backend["url"]
-    api_key = _backend["key"]
-
-    # Several tabs poll this; share one sweep instead of stacking them.
-    async with _sweep_lock:
-        recent = _last_sweep.get(model)
-        if recent and time.monotonic() - recent[0] < SWEEP_REUSE_SECONDS:
-            return recent[1]
-        epoch = _generation_epoch
-        results = await _sweep_cache_status(omlx_url, api_key, model)
-        # Don't reuse a sweep that generation paused part-way through.
-        if epoch == _generation_epoch and not _active_generations and "_error" not in results:
-            _last_sweep[model] = (time.monotonic(), results)
-        return results
-
-
-async def _sweep_cache_status(omlx_url: str, api_key: str, model: Optional[str]) -> dict:
-    conversations = await db.list_conversations()
-    results: dict = {}
-    try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            login_resp = await client.post(
-                f"{omlx_url}/admin/api/login",
-                json={"api_key": api_key},
-            )
-            cookies = login_resp.cookies
-            for conv in conversations:
-                try:
-                    latest = await db.get_latest_leaf(conv["id"])
-                    if latest is None:
-                        results[conv["id"]] = {"status": "empty"}
-                        continue
-                    results[conv["id"]] = await _probe_leaf_cache(
-                        conv, latest["id"], client=client, cookies=cookies,
-                        model_override=model,
-                    )
-                except Exception as e:
-                    results[conv["id"]] = {"status": "error", "detail": str(e)}
-    except Exception as e:
-        # Total failure (oMLX down, login failed) — return empty so the UI
-        # doesn't error out; dots will render as 'unknown'.
-        return {"_error": str(e)}
-    return results
 
 
 # --- Document parsing ---

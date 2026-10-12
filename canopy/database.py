@@ -460,24 +460,6 @@ async def get_root_messages(conversation_id: str) -> list[dict]:
     return [_message_row(r) for r in rows]
 
 
-async def get_latest_leaf(conversation_id: str) -> Optional[dict]:
-    """Return the most recently created message in a conversation.
-
-    Used to probe the "active tip" of a branched chat for cache status:
-    branches are fine-grained, but the newest leaf is the one most likely to
-    correspond to what the user is currently viewing, and therefore the most
-    useful single path to report cache status for.
-    """
-    db = _get_db()
-    cursor = await db.execute(
-        "SELECT * FROM messages WHERE conversation_id = ? "
-        "ORDER BY created_at DESC LIMIT 1",
-        (conversation_id,),
-    )
-    row = await cursor.fetchone()
-    return _message_row(row) if row else None
-
-
 async def delete_message_tree(message_id: str) -> bool:
     """Delete a message and all its descendants recursively."""
     db = _get_db()
