@@ -1326,6 +1326,8 @@
                         <option :value="m.id" x-text="m.id"></option>
                     </template>
                 </select>
+                <div x-show="asrLimitWarning()" x-cloak x-text="asrLimitWarning()"
+                     style="font-size:12px;color:var(--danger);margin-bottom:12px;"></div>
             </div>
             <div style="display:flex;gap:8px;justify-content:flex-end;">
                 <button class="btn-secondary" style="padding:8px 14px;font-size:13px;" @click="cancelAsrModal()">Cancel</button>
@@ -2953,6 +2955,19 @@
                 this.$nextTick(() => lucide.createIcons());
             },
 
+            // Some ASR models silently drop audio past a fixed length. Canopy
+            // splits long files to stay under it, but can't decode webm, so
+            // those go up whole and get cut.
+            asrLimitWarning() {
+                const name = (this.asrPendingFile?.name || '').toLowerCase();
+                const m = this.asrModels.find(m => m.id === this.asrModel);
+                if (!m?.max_seconds || !name.endsWith('.webm')) return '';
+                const mins = Math.floor(m.max_seconds / 60);
+                return `${m.id} transcribes at most ${mins} minutes, and Canopy can't split .webm files. `
+                     + `If this recording is longer, everything after ${mins}:00 will be missing. `
+                     + `Convert it to m4a or mp3, or pick a model without this limit.`;
+            },
+
             cancelAsrModal() {
                 this.asrModalOpen = false;
                 this.asrPendingFile = null;
@@ -3000,6 +3015,7 @@
                     if (idx >= 0) this.pendingDocuments.splice(idx, 1, doc);
                     else this.pendingDocuments.push(doc);
                     this.$nextTick(() => lucide.createIcons());
+                    if (doc.warning) alert(doc.warning);
                 } catch (e) {
                     console.error('Transcription request failed:', e);
                     const idx = this.pendingDocuments.indexOf(placeholder);

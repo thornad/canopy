@@ -3,6 +3,7 @@
 import asyncio
 import json
 import re
+import tempfile
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Optional
@@ -13,7 +14,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from . import database as db
+from . import audio, database as db
 from ._version import __version__
 from .documents import parse_document
 from .mcp import MCPClient, MCPError, parse_args_string, parse_env_string, registry as mcp_registry
@@ -964,7 +965,8 @@ async def list_asr_models():
     if not isinstance(models, list):
         return {"data": []}
     filtered = [
-        m for m in models
+        {**m, "max_seconds": audio.model_limit(str(m.get("id", "")))}
+        for m in models
         if isinstance(m, dict)
         and any(h in str(m.get("id", "")).lower() for h in _ASR_NAME_HINTS)
     ]
@@ -992,37 +994,61 @@ async def transcribe_audio(
 
     filename = file.filename or "audio"
     file_bytes = await file.read()
-    files = {"file": (filename, file_bytes, file.content_type or "application/octet-stream")}
     # Raise the per-call output cap from mlx-audio's default (e.g. VibeVoice
     # caps at 8192 = ~24 min audio). oMLX silently ignores max_tokens when its
     # build is older than the field. Models that don't respect max_tokens
     # (whisper accepts **decode_options) treat it as a no-op.
     form = {"model": model, "max_tokens": "65536"}
 
-    try:
-        # 15 min total cap so very long files (multi-hour audio at slower
-        # ASR models) don't hit the default httpx 5s read timeout.
-        async with httpx.AsyncClient(timeout=httpx.Timeout(900.0, connect=10.0)) as client:
-            resp = await client.post(
-                f"{omlx_url}/v1/audio/transcriptions",
-                headers=headers,
-                files=files,
-                data=form,
-            )
-    except Exception as e:
-        raise HTTPException(502, f"Cannot reach oMLX: {e}")
+    with tempfile.TemporaryDirectory(prefix="canopy-asr-") as tmp:
+        workdir = Path(tmp)
+        src = workdir / ("upload" + Path(filename).suffix)
+        src.write_bytes(file_bytes)
+        del file_bytes
+        # Long recordings go up in pieces: oMLX has no "start at" option and
+        # VibeVoice keeps only the first 59 minutes of whatever it is sent.
+        pieces = await asyncio.to_thread(audio.split_for_transcription, src, workdir)
 
-    if resp.status_code != 200:
-        try:
-            err = resp.json().get("error", {}).get("message") or resp.text
-        except Exception:
-            err = resp.text
-        raise HTTPException(resp.status_code, f"Transcription failed: {err}")
+        parts: list[tuple[float, str]] = []
+        truncated_at: Optional[float] = None
+        duration: Optional[float] = 0.0
+        language = None
+        for i, (offset, path) in enumerate(pieces):
+            if len(pieces) == 1:
+                upload = (filename, path.read_bytes(),
+                          file.content_type or "application/octet-stream")
+            else:
+                upload = (f"{Path(filename).stem}.part{i + 1}.m4a", path.read_bytes(), "audio/mp4")
+            try:
+                # oMLX answers only once the whole piece is transcribed. A
+                # 59-minute piece took VibeVoice 8 minutes; 20 leaves headroom.
+                async with httpx.AsyncClient(timeout=httpx.Timeout(1200.0, connect=10.0)) as client:
+                    resp = await client.post(
+                        f"{omlx_url}/v1/audio/transcriptions",
+                        headers=headers,
+                        files={"file": upload},
+                        data=form,
+                    )
+            except Exception as e:
+                raise HTTPException(502, f"Cannot reach oMLX: {e}")
 
-    payload = resp.json()
-    text = payload.get("text") or ""
-    duration = payload.get("duration")
-    language = payload.get("language")
+            if resp.status_code != 200:
+                try:
+                    err = resp.json().get("error", {}).get("message") or resp.text
+                except Exception:
+                    err = resp.text
+                where = f" (part {i + 1} of {len(pieces)})" if len(pieces) > 1 else ""
+                raise HTTPException(resp.status_code, f"Transcription failed{where}: {err}")
+
+            payload = resp.json()
+            parts.append((offset, payload.get("text") or ""))
+            if audio.cut_at_limit(parts[-1][1], model):
+                truncated_at = offset + audio.model_limit(model)
+            piece_duration = payload.get("duration")
+            duration = duration + piece_duration if duration is not None and piece_duration is not None else None
+            language = language or payload.get("language")
+
+    text = audio.merge_transcripts(parts)
 
     result: dict = {
         "filename": filename,
@@ -1035,6 +1061,14 @@ async def transcribe_audio(
         result["duration"] = duration
     if language:
         result["language"] = language
+    if truncated_at is not None:
+        mins = int(truncated_at // 60)
+        result["warning"] = (
+            f"The transcript stops at {mins // 60}:{mins % 60:02d}:00, the most "
+            f"{model} can transcribe at once. Anything after that is missing. "
+            f"Convert the file to m4a or mp3 so Canopy can split it, or use a "
+            f"model without this limit (e.g. Whisper)."
+        )
 
     if conversation_id:
         doc = await db.add_document(
