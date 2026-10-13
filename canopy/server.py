@@ -939,11 +939,12 @@ _ASR_NAME_HINTS = ("whisper", "vibevoice", "asr", "stt")
 
 @app.get("/api/asr-models")
 async def list_asr_models():
-    """Return the subset of oMLX models that look like ASR / STT engines.
+    """Return the oMLX models that transcribe speech.
 
-    oMLX's /v1/models response is OpenAI-shaped and doesn't reliably expose
-    a model_type, so we filter by id substring. Matches the names actually
-    on disk today (whisper-*, VibeVoice-ASR-*) and reasonable variants.
+    oMLX's /v1/models/status reports each model's ``engine_type``, so keep
+    the ``audio_stt`` ones. Matching names let in text-to-speech models
+    (vibevoice-mlx, and VibeVoice-ASR-Streaming-7B, which oMLX loads as
+    TTS), so names are only a fallback for oMLX builds without the field.
     """
     settings = await db.get_settings()
     _backend = _active_backend(settings)
@@ -956,19 +957,30 @@ async def list_asr_models():
         headers["Authorization"] = f"Bearer {api_key}"
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
-            resp = await client.get(f"{omlx_url}/v1/models", headers=headers)
-            data = resp.json()
+            resp = await client.get(f"{omlx_url}/v1/models/status", headers=headers)
+            data = resp.json() if resp.status_code == 200 else {}
+            models = data.get("models") if isinstance(data, dict) else None
+            if not isinstance(models, list) or not any(
+                isinstance(m, dict) and "engine_type" in m for m in models
+            ):
+                resp = await client.get(f"{omlx_url}/v1/models", headers=headers)
+                data = resp.json()
+                models = data.get("data") if isinstance(data, dict) else None
     except Exception as e:
         raise HTTPException(502, f"Cannot reach oMLX: {e}")
 
-    models = data.get("data") if isinstance(data, dict) else None
     if not isinstance(models, list):
         return {"data": []}
+
+    def is_stt(m: dict) -> bool:
+        if "engine_type" in m:
+            return m["engine_type"] == "audio_stt"
+        return any(h in str(m.get("id", "")).lower() for h in _ASR_NAME_HINTS)
+
     filtered = [
-        {**m, "max_seconds": audio.model_limit(str(m.get("id", "")))}
+        {"id": m["id"], "max_seconds": audio.model_limit(str(m["id"]))}
         for m in models
-        if isinstance(m, dict)
-        and any(h in str(m.get("id", "")).lower() for h in _ASR_NAME_HINTS)
+        if isinstance(m, dict) and m.get("id") and is_stt(m)
     ]
     return {"data": filtered}
 

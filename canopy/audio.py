@@ -20,7 +20,8 @@ MAX_PIECE_SECONDS = 55 * 60
 CUT_SEARCH_SECONDS = 120
 CUT_WINDOW_SECONDS = 0.5
 # ASR models that silently drop audio past a fixed length, matched by a
-# substring of the model id. mlx-audio's VibeVoice trims to 59 minutes.
+# substring of the model id. mlx-audio's VibeVoice-ASR trims to 59 minutes;
+# Whisper and GLM-ASR step through the whole file in 30 s windows.
 MODEL_LIMITS = {"vibevoice": 59 * 60}
 # A transcript ending this close to the model's limit was probably cut.
 LIMIT_SLACK_SECONDS = 10
