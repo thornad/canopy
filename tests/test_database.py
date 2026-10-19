@@ -367,6 +367,21 @@ class TestSearch:
         assert results[0]["match_count"] == 2
         assert await db.search_messages("soul group") == []
 
+    async def test_thinking_is_not_searched(self):
+        conv = await db.create_conversation()
+        await db.add_message(
+            conv["id"], "assistant",
+            '<think>the user wants zebra facts</think data-elapsed="12">Here you go.',
+        )
+        await db.add_message(conv["id"], "assistant", "<think>cut off mid zebra")
+        assert await db.search_messages("zebra") == []
+        both = await db.add_message(
+            conv["id"], "assistant", "<think>zebra plan</think>Zebras have stripes.",
+        )
+        results = await db.search_messages("zebra")
+        assert [h["msg_id"] for h in results[0]["hits"]] == [both["id"]]
+        assert results[0]["hits"][0]["snippet"] == "Zebras have stripes."
+
     async def test_tool_output_is_not_searched(self):
         conv = await db.create_conversation()
         await db.add_message(conv["id"], "tool", "secret tool payload")

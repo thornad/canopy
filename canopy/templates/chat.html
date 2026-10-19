@@ -52,6 +52,7 @@
             --btn-primary-text: #ffffff;
             --accent: #059669;
             --accent-light: #d1fae5;
+            --search-hl: #fde68a;
             --danger: #ef4444;
             --danger-bg: rgba(239, 68, 68, 0.1);
         }
@@ -72,6 +73,7 @@
             --btn-primary-text: #18181b;
             --accent: #34d399;
             --accent-light: #064e3b;
+            --search-hl: #854d0e;
             --danger: #f87171;
             --danger-bg: rgba(239, 68, 68, 0.2);
         }
@@ -257,6 +259,9 @@
             background: var(--accent-light); color: inherit;
             border-radius: 2px; padding: 0 1px;
         }
+        /* Search matches in the open chat, painted through the CSS Custom
+           Highlight API so the rendered message HTML is never touched. */
+        ::highlight(canopy-search) { background-color: var(--search-hl); color: inherit; }
         .conv-item.search-cursor, .search-hit.search-cursor {
             outline: 1px solid var(--accent); outline-offset: -1px;
         }
@@ -1557,6 +1562,8 @@
             searchCursor: -1,       // index into searchEntries for arrow-key navigation
             _searchTimer: null,
             _searchSeq: 0,
+            _docHighlightTimer: null,
+            _docHighlightScrollTo: null,   // message whose first match to scroll to
 
             // Message tree
             messageTree: {},        // id → message
@@ -1663,6 +1670,8 @@
                 this.$watch('searchResults', () => {
                     this.$nextTick(() => lucide.createIcons());
                 });
+                this.$watch('searchQuery', () => this._scheduleDocHighlights());
+                this.$watch('activePath', () => this._scheduleDocHighlights());
                 window.addEventListener('keydown', (e) => {
                     if ((e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === 'k') {
                         e.preventDefault();
@@ -3341,7 +3350,80 @@
                 if (this.currentConversationId !== convId) await this.loadConversation(convId);
                 // The hit may be gone (deleted since the search ran). Jump
                 // instantly: a smooth scroll past long chats takes seconds.
-                if (this.messageTree[msgId]) this.treeNavigate(msgId, 'instant');
+                if (!this.messageTree[msgId]) return;
+                this.treeNavigate(msgId, 'instant');
+                // Then bring the first match inside that message into view.
+                this._scheduleDocHighlights(msgId);
+            },
+
+            // Runs after the chat has rendered, including the markdown and
+            // math passes that replace text nodes (which would orphan ranges).
+            _scheduleDocHighlights(scrollToMsgId = null) {
+                clearTimeout(this._docHighlightTimer);
+                if (scrollToMsgId) this._docHighlightScrollTo = scrollToMsgId;
+                this.$nextTick(() => requestAnimationFrame(() => {
+                    this._docHighlightTimer = setTimeout(() => this._applyDocHighlights(), 60);
+                }));
+            },
+
+            // Marks every phrase match in the visible messages, skipping
+            // thinking blocks and buttons. Text is matched per message body
+            // across its text nodes, so a phrase split by formatting
+            // ("group **soul**") still hits.
+            _applyDocHighlights() {
+                const scrollTo = this._docHighlightScrollTo;
+                this._docHighlightScrollTo = null;
+                if (!window.CSS?.highlights || typeof Highlight === 'undefined') return;
+                CSS.highlights.delete('canopy-search');
+                if (!this.searching) return;
+                const re = new RegExp(this.searchPattern, 'gi');
+                const ranges = [];
+                let firstInTarget = null;
+                const bodies = document.querySelectorAll(
+                    '#messagesContainer .user-bubble, #messagesContainer .msg-body');
+                for (const body of bodies) {
+                    const walker = document.createTreeWalker(
+                        body, NodeFilter.SHOW_TEXT | NodeFilter.SHOW_ELEMENT, {
+                            acceptNode: n => {
+                                if (n.nodeType === Node.TEXT_NODE) return NodeFilter.FILTER_ACCEPT;
+                                if (n.matches('.thinking-container, button')) return NodeFilter.FILTER_REJECT;
+                                return n.tagName === 'BR' ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_SKIP;
+                            },
+                        });
+                    const nodes = [];  // [{node, start}] — offsets into `text`
+                    let text = '';
+                    for (let n; (n = walker.nextNode());) {
+                        // A <br> is a line break in the source text: count it
+                        // as whitespace so "group<br>soul" still matches.
+                        if (n.nodeType !== Node.TEXT_NODE) { text += '\n'; continue; }
+                        nodes.push({ node: n, start: text.length });
+                        text += n.data;
+                    }
+                    let i = 0;
+                    const locate = (pos, isEnd) => {
+                        // Matches arrive in order, so the cursor only moves forward.
+                        while (i < nodes.length - 1 &&
+                               (isEnd ? nodes[i + 1].start < pos : nodes[i + 1].start <= pos)) i++;
+                        // Matches start and end on word characters, never on
+                        // a <br>'s stand-in, but clamp to the node anyway.
+                        return [nodes[i].node, Math.min(pos - nodes[i].start, nodes[i].node.length)];
+                    };
+                    for (const m of text.matchAll(re)) {
+                        const range = new Range();
+                        range.setStart(...locate(m.index, false));
+                        range.setEnd(...locate(m.index + m[0].length, true));
+                        ranges.push(range);
+                        if (!firstInTarget && scrollTo && body.closest(`[data-msg-id="${scrollTo}"]`)) {
+                            firstInTarget = range;
+                        }
+                    }
+                }
+                if (ranges.length) CSS.highlights.set('canopy-search', new Highlight(...ranges));
+                if (firstInTarget) {
+                    const c = document.getElementById('messagesContainer');
+                    const top = firstInTarget.getBoundingClientRect().top - c.getBoundingClientRect().top;
+                    c.scrollTo({ top: c.scrollTop + top - c.clientHeight / 3, behavior: 'instant' });
+                }
             },
 
             // Escapes text for x-html and marks every phrase hit in it.

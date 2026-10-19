@@ -542,6 +542,9 @@ async def delete_message_tree(message_id: str) -> bool:
 
 _SNIPPET_BEFORE = 50
 _SNIPPET_AFTER = 110
+# Reasoning blocks in assistant replies (same tags the UI strips). An
+# unclosed block, from a reply cut off mid-thought, runs to the end.
+_THINK_RE = re.compile(r"<think>[\s\S]*?(?:</think[^>]*>|$)")
 
 
 def _snippet(text: str, phrase: re.Pattern) -> str:
@@ -595,7 +598,10 @@ async def search_messages(
     )
     results: dict[str, dict] = {}
     for row in await cursor.fetchall():
-        if not phrase.search(row["content"]):
+        # The index holds the raw text, thinking included; only the visible
+        # reply counts as a match.
+        text = _THINK_RE.sub("", row["content"])
+        if not phrase.search(text):
             continue
         conv_id = row["conversation_id"]
         conv = results.get(conv_id)
@@ -615,7 +621,7 @@ async def search_messages(
             conv["hits"].append({
                 "msg_id": row["msg_id"],
                 "role": row["role"],
-                "snippet": _snippet(row["content"], phrase),
+                "snippet": _snippet(text, phrase),
             })
     return list(results.values())
 
