@@ -544,10 +544,9 @@ _SNIPPET_BEFORE = 50
 _SNIPPET_AFTER = 110
 
 
-def _snippet(text: str, terms: list[str]) -> str:
-    """A short single-line excerpt of ``text`` around the first term hit."""
-    pattern = "|".join(re.escape(t) for t in terms)
-    m = re.search(pattern, text, re.IGNORECASE)
+def _snippet(text: str, phrase: re.Pattern) -> str:
+    """A short single-line excerpt of ``text`` around the first phrase hit."""
+    m = phrase.search(text)
     start = max(0, m.start() - _SNIPPET_BEFORE) if m else 0
     end = min(len(text), (m.end() if m else 0) + _SNIPPET_AFTER)
     out = " ".join(text[start:end].split())
@@ -568,17 +567,20 @@ async def search_messages(
 ) -> list[dict]:
     """Find conversations whose user/assistant messages contain the query.
 
-    Every whitespace-separated term must appear (case-insensitively, as a
-    substring) in the same message. Results are grouped per conversation,
-    most recently updated first, each with up to ``hits_per_conversation``
-    snippets in message order.
+    The query matches as a phrase: its words in order, case-insensitively,
+    as a substring, with any run of whitespace between them (so a phrase
+    wrapped onto a new line still hits). Results are grouped per
+    conversation, most recently updated first, each with up to
+    ``hits_per_conversation`` snippets in message order.
     """
-    terms = query.split()[:8]
+    terms = query.split()
     if not terms:
         return []
+    phrase = re.compile(r"\s+".join(re.escape(t) for t in terms), re.IGNORECASE)
     db = _get_db()
-    # LIKE on a trigram FTS5 column uses the index for terms of 3+ chars;
-    # shorter ones still work, as a scan.
+    # Each word as a LIKE narrows the rows through the trigram index (words
+    # of 3+ chars; shorter ones scan); the phrase regex then checks order
+    # and adjacency, which LIKE can't express with flexible whitespace.
     where = " AND ".join("f.content LIKE ? ESCAPE '\\'" for _ in terms)
     cursor = await db.execute(
         "SELECT f.msg_id, f.conversation_id, f.content, m.role, "
@@ -593,6 +595,8 @@ async def search_messages(
     )
     results: dict[str, dict] = {}
     for row in await cursor.fetchall():
+        if not phrase.search(row["content"]):
+            continue
         conv_id = row["conversation_id"]
         conv = results.get(conv_id)
         if conv is None:
@@ -611,7 +615,7 @@ async def search_messages(
             conv["hits"].append({
                 "msg_id": row["msg_id"],
                 "role": row["role"],
-                "snippet": _snippet(row["content"], terms),
+                "snippet": _snippet(row["content"], phrase),
             })
     return list(results.values())
 

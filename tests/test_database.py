@@ -355,14 +355,17 @@ class TestSearch:
         assert hit["role"] == "user"
         assert "VibeVoiceASR" in hit["snippet"]
 
-    async def test_all_terms_must_match_one_message(self):
+    async def test_multiple_words_match_as_a_phrase(self):
         conv = await db.create_conversation()
-        await db.add_message(conv["id"], "user", "alpha only")
-        await db.add_message(conv["id"], "assistant", "beta only")
-        assert await db.search_messages("alpha beta") == []
-        both = await db.add_message(conv["id"], "user", "alpha and beta")
-        results = await db.search_messages("beta alpha")
-        assert [h["msg_id"] for h in results[0]["hits"]] == [both["id"]]
+        await db.add_message(conv["id"], "user", "group of souls")
+        await db.add_message(conv["id"], "assistant", "the soul of a group")
+        phrase = await db.add_message(conv["id"], "user", "a Group Soul forms")
+        wrapped = await db.add_message(conv["id"], "assistant", "each group\n  soul here")
+
+        results = await db.search_messages("group soul")
+        assert [h["msg_id"] for h in results[0]["hits"]] == [phrase["id"], wrapped["id"]]
+        assert results[0]["match_count"] == 2
+        assert await db.search_messages("soul group") == []
 
     async def test_tool_output_is_not_searched(self):
         conv = await db.create_conversation()

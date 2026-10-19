@@ -824,9 +824,9 @@
                                         <i data-lucide="trash-2" style="width:12px;height:12px;"></i>
                                     </button>
                                 </div>
-                                <template x-if="searching && searchHits[conv.id]">
+                                <template x-if="searching && searchHitsFor(conv.id).hits.length">
                                     <div class="search-hits">
-                                        <template x-for="hit in searchHits[conv.id].hits" :key="hit.msg_id">
+                                        <template x-for="hit in searchHitsFor(conv.id).hits" :key="hit.msg_id">
                                             <div class="search-hit" :class="{ 'search-cursor': isSearchCursor(conv.id, hit.msg_id) }"
                                                  :data-search-key="conv.id + ':' + hit.msg_id"
                                                  @click="openSearchHit(conv.id, hit.msg_id)">
@@ -836,8 +836,8 @@
                                                 </span>
                                             </div>
                                         </template>
-                                        <div class="search-more" x-show="searchHits[conv.id].match_count > searchHits[conv.id].hits.length"
-                                             x-text="'+' + (searchHits[conv.id].match_count - searchHits[conv.id].hits.length) + ' more in this chat'"></div>
+                                        <div class="search-more" x-show="searchHitsFor(conv.id).match_count > searchHitsFor(conv.id).hits.length"
+                                             x-text="'+' + (searchHitsFor(conv.id).match_count - searchHitsFor(conv.id).hits.length) + ' more in this chat'"></div>
                                     </div>
                                 </template>
                             </div>
@@ -864,9 +864,9 @@
                             <i data-lucide="trash-2" style="width:12px;height:12px;"></i>
                         </button>
                     </div>
-                    <template x-if="searching && searchHits[conv.id]">
+                    <template x-if="searching && searchHitsFor(conv.id).hits.length">
                         <div class="search-hits">
-                            <template x-for="hit in searchHits[conv.id].hits" :key="hit.msg_id">
+                            <template x-for="hit in searchHitsFor(conv.id).hits" :key="hit.msg_id">
                                 <div class="search-hit" :class="{ 'search-cursor': isSearchCursor(conv.id, hit.msg_id) }"
                                      :data-search-key="conv.id + ':' + hit.msg_id"
                                      @click="openSearchHit(conv.id, hit.msg_id)">
@@ -876,8 +876,8 @@
                                     </span>
                                 </div>
                             </template>
-                            <div class="search-more" x-show="searchHits[conv.id].match_count > searchHits[conv.id].hits.length"
-                                 x-text="'+' + (searchHits[conv.id].match_count - searchHits[conv.id].hits.length) + ' more in this chat'"></div>
+                            <div class="search-more" x-show="searchHitsFor(conv.id).match_count > searchHitsFor(conv.id).hits.length"
+                                 x-text="'+' + (searchHitsFor(conv.id).match_count - searchHitsFor(conv.id).hits.length) + ' more in this chat'"></div>
                         </div>
                     </template>
                 </div>
@@ -3227,8 +3227,11 @@
                 return this.searchQuery.trim() !== '';
             },
 
-            get searchTerms() {
-                return this.searchQuery.trim().toLowerCase().split(/\s+/).filter(Boolean);
+            // The query as a phrase: its words in order, any whitespace
+            // between them (matches the server's rule).
+            get searchPattern() {
+                const words = this.searchQuery.trim().split(/\s+/).filter(Boolean);
+                return words.map(w => w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('\\s+');
             },
 
             get searchHits() {
@@ -3237,10 +3240,15 @@
                 return byConv;
             },
 
+            // Never undefined: Alpine can re-evaluate a hit block once more
+            // after its chat drops out of the latest results.
+            searchHitsFor(convId) {
+                return this.searchHits[convId] || { hits: [], match_count: 0 };
+            },
+
             _matchesSearch(conv) {
                 if (this.searchHits[conv.id]) return true;
-                const title = (conv.title || 'New Chat').toLowerCase();
-                return this.searchTerms.every(t => title.includes(t));
+                return new RegExp(this.searchPattern, 'i').test(conv.title || 'New Chat');
             },
 
             visibleConvsInFolder(folderId) {
@@ -3336,14 +3344,10 @@
                 if (this.messageTree[msgId]) this.treeNavigate(msgId, 'instant');
             },
 
-            // Escapes text for x-html and marks every search term in it.
+            // Escapes text for x-html and marks every phrase hit in it.
             highlightSearch(text) {
-                const terms = this.searching ? this.searchTerms : [];
-                if (terms.length === 0) return this._escHtml(text);
-                const pattern = terms
-                    .map(t => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
-                    .join('|');
-                return text.split(new RegExp(`(${pattern})`, 'gi'))
+                if (!this.searching) return this._escHtml(text);
+                return text.split(new RegExp(`(${this.searchPattern})`, 'gi'))
                     .map((part, i) => i % 2 ? `<mark>${this._escHtml(part)}</mark>` : this._escHtml(part))
                     .join('');
             },
