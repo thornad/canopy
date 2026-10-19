@@ -126,8 +126,10 @@
             position: relative; top: 2px;
         }
 
+        /* New Chat and New Folder share one row to save sidebar height. */
+        .sidebar-actions { display: flex; gap: 6px; margin: 12px 12px 8px; }
         .new-chat-btn {
-            margin: 12px; padding: 8px 12px;
+            flex: 1; padding: 8px 12px;
             background: var(--bg-tertiary);
             border: 1px solid var(--border-faint);
             border-radius: 8px; cursor: pointer;
@@ -203,16 +205,60 @@
         }
         .folder-children { padding-left: 14px; }
         .new-folder-btn {
-            margin: 0 8px 4px; padding: 6px 10px;
+            padding: 6px 10px;
             background: none; border: 1px dashed var(--border-faint);
-            border-radius: 6px; cursor: pointer;
+            border-radius: 8px; cursor: pointer;
             font-size: 12px; color: var(--text-tertiary);
             display: flex; align-items: center; gap: 6px;
-            width: calc(100% - 16px);
+            white-space: nowrap;
         }
         .new-folder-btn:hover {
             color: var(--text-primary); border-color: var(--border-normal);
             background: var(--bg-tertiary);
+        }
+
+        /* Sidebar search */
+        .sidebar-search {
+            display: flex; align-items: center; gap: 6px;
+            margin: 0 12px 6px; padding: 5px 8px;
+            background: var(--bg-primary);
+            border: 1px solid var(--border-faint); border-radius: 8px;
+            color: var(--text-muted);
+        }
+        .sidebar-search:focus-within { border-color: var(--accent); }
+        .sidebar-search input {
+            flex: 1; min-width: 0; border: none; outline: none; background: none;
+            font-size: 12px; color: var(--text-primary);
+        }
+        .sidebar-search button {
+            background: none; border: none; cursor: pointer; padding: 2px;
+            color: var(--text-muted); display: flex; border-radius: 4px;
+        }
+        .sidebar-search button:hover { color: var(--text-primary); background: var(--bg-tertiary); }
+        .search-empty { padding: 12px 10px; font-size: 12px; color: var(--text-muted); }
+        .search-hits { margin: 0 0 4px 10px; }
+        .search-hit {
+            padding: 4px 8px; border-radius: 6px; cursor: pointer;
+            font-size: 11px; line-height: 1.4; color: var(--text-secondary);
+        }
+        /* Clamp on an inner box: with the padding on the same element the
+           clipped fourth line would show through the bottom padding. */
+        .search-hit-text {
+            display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical;
+            overflow: hidden; overflow-wrap: anywhere;
+        }
+        .search-hit:hover { background: var(--bg-tertiary); }
+        .search-hit-role {
+            font-size: 9px; font-weight: 600; text-transform: uppercase;
+            color: var(--text-muted); margin-right: 4px;
+        }
+        .search-more { padding: 0 8px 2px; font-size: 10px; color: var(--text-muted); }
+        .sidebar mark {
+            background: var(--accent-light); color: inherit;
+            border-radius: 2px; padding: 0 1px;
+        }
+        .conv-item.search-cursor, .search-hit.search-cursor {
+            outline: 1px solid var(--accent); outline-offset: -1px;
         }
 
         /* Sidebar context menu (right-click on a chat) */
@@ -716,24 +762,41 @@
                 <span class="version">v{{ version }}</span>
             </h1>
         </div>
-        <button class="new-chat-btn" @click="newChat()">
-            <i data-lucide="plus" style="width:16px;height:16px;"></i>
-            New Chat
-        </button>
-        <button class="new-folder-btn" @click="createFolder()">
-            <i data-lucide="folder-plus" style="width:14px;height:14px;"></i>
-            New Folder
-        </button>
+        <div class="sidebar-actions">
+            <button class="new-chat-btn" @click="newChat()">
+                <i data-lucide="plus" style="width:16px;height:16px;"></i>
+                New Chat
+            </button>
+            <button class="new-folder-btn" @click="createFolder()">
+                <i data-lucide="folder-plus" style="width:14px;height:14px;"></i>
+                New Folder
+            </button>
+        </div>
+        <div class="sidebar-search">
+            <i data-lucide="search" style="width:13px;height:13px;flex-shrink:0;"></i>
+            <input type="text" x-ref="searchInput" placeholder="Search chats  ⌘K"
+                   x-model="searchQuery" @input="onSearchInput()"
+                   @keydown.escape.prevent="clearSearch()"
+                   @keydown.arrow-down.prevent="moveSearchCursor(1)"
+                   @keydown.arrow-up.prevent="moveSearchCursor(-1)"
+                   @keydown.enter.prevent="openSearchCursor()">
+            <button x-show="searchQuery" x-cloak @click="clearSearch()" title="Clear search">
+                <i data-lucide="x" style="width:12px;height:12px;"></i>
+            </button>
+        </div>
         <div class="conv-list custom-scrollbar">
+            <div class="search-empty" x-show="searching && !searchLoading && searchEntries.length === 0" x-cloak>
+                No chats match.
+            </div>
             <!-- Folders (rendered above unfiled chats) -->
-            <template x-for="folder in folders" :key="folder.id">
+            <template x-for="folder in visibleFolders" :key="folder.id">
                 <div>
-                    <div class="folder-row" :class="{ expanded: !!expandedFolders[folder.id] }"
+                    <div class="folder-row" :class="{ expanded: searching || !!expandedFolders[folder.id] }"
                          @click="toggleFolder(folder.id)">
                         <i class="folder-chev" data-lucide="chevron-right" style="width:12px;height:12px;"></i>
                         <i data-lucide="folder" style="width:14px;height:14px;color:var(--accent);flex-shrink:0;"></i>
                         <span class="folder-name" x-text="folder.name"></span>
-                        <span class="folder-count" x-text="convsInFolder(folder.id).length"></span>
+                        <span class="folder-count" x-text="visibleConvsInFolder(folder.id).length"></span>
                         <span class="folder-actions">
                             <button @click.stop="renameFolder(folder)" title="Rename folder">
                                 <i data-lucide="pencil" style="width:12px;height:12px;"></i>
@@ -743,21 +806,40 @@
                             </button>
                         </span>
                     </div>
-                    <div class="folder-children" x-show="expandedFolders[folder.id]" x-cloak>
-                        <template x-for="conv in convsInFolder(folder.id)" :key="conv.id">
-                            <div class="conv-item" :class="{ active: currentConversationId === conv.id }"
-                                 @click="loadConversation(conv.id)"
-                                 @contextmenu.prevent="openConvContextMenu($event, conv)">
-                                <div class="conv-title-wrap">
-                                    <span class="conv-title" x-text="conv.title || 'New Chat'"></span>
-                                    <span class="conv-time"
-                                          x-text="formatRelativeTime(conv.updated_at)"
-                                          :title="formatAbsoluteTime(conv.updated_at)"></span>
+                    <div class="folder-children" x-show="searching || expandedFolders[folder.id]" x-cloak>
+                        <template x-for="conv in visibleConvsInFolder(folder.id)" :key="conv.id">
+                            <div>
+                                <div class="conv-item" :class="{ active: currentConversationId === conv.id, 'search-cursor': isSearchCursor(conv.id, null) }"
+                                     :data-search-key="conv.id"
+                                     @click="loadConversation(conv.id)"
+                                     @contextmenu.prevent="openConvContextMenu($event, conv)">
+                                    <div class="conv-title-wrap">
+                                        <span class="conv-title" x-html="highlightSearch(conv.title || 'New Chat')"></span>
+                                        <span class="conv-time"
+                                              x-text="formatRelativeTime(conv.updated_at)"
+                                              :title="formatAbsoluteTime(conv.updated_at)"></span>
+                                    </div>
+                                    <button class="delete-btn" @click.stop="deleteConversation(conv.id)"
+                                            title="Delete">
+                                        <i data-lucide="trash-2" style="width:12px;height:12px;"></i>
+                                    </button>
                                 </div>
-                                <button class="delete-btn" @click.stop="deleteConversation(conv.id)"
-                                        title="Delete">
-                                    <i data-lucide="trash-2" style="width:12px;height:12px;"></i>
-                                </button>
+                                <template x-if="searching && searchHits[conv.id]">
+                                    <div class="search-hits">
+                                        <template x-for="hit in searchHits[conv.id].hits" :key="hit.msg_id">
+                                            <div class="search-hit" :class="{ 'search-cursor': isSearchCursor(conv.id, hit.msg_id) }"
+                                                 :data-search-key="conv.id + ':' + hit.msg_id"
+                                                 @click="openSearchHit(conv.id, hit.msg_id)">
+                                                <span class="search-hit-text">
+                                                    <span class="search-hit-role" x-text="hit.role === 'user' ? 'You' : 'AI'"></span>
+                                                    <span x-html="highlightSearch(hit.snippet)"></span>
+                                                </span>
+                                            </div>
+                                        </template>
+                                        <div class="search-more" x-show="searchHits[conv.id].match_count > searchHits[conv.id].hits.length"
+                                             x-text="'+' + (searchHits[conv.id].match_count - searchHits[conv.id].hits.length) + ' more in this chat'"></div>
+                                    </div>
+                                </template>
                             </div>
                         </template>
                     </div>
@@ -765,20 +847,39 @@
             </template>
 
             <!-- Unfiled conversations (below folders) -->
-            <template x-for="conv in unfiledConversations" :key="conv.id">
-                <div class="conv-item" :class="{ active: currentConversationId === conv.id }"
-                     @click="loadConversation(conv.id)"
-                     @contextmenu.prevent="openConvContextMenu($event, conv)">
-                    <div class="conv-title-wrap">
-                        <span class="conv-title" x-text="conv.title || 'New Chat'"></span>
-                        <span class="conv-time"
-                              x-text="formatRelativeTime(conv.updated_at)"
-                              :title="formatAbsoluteTime(conv.updated_at)"></span>
+            <template x-for="conv in visibleUnfiledConversations" :key="conv.id">
+                <div>
+                    <div class="conv-item" :class="{ active: currentConversationId === conv.id, 'search-cursor': isSearchCursor(conv.id, null) }"
+                         :data-search-key="conv.id"
+                         @click="loadConversation(conv.id)"
+                         @contextmenu.prevent="openConvContextMenu($event, conv)">
+                        <div class="conv-title-wrap">
+                            <span class="conv-title" x-html="highlightSearch(conv.title || 'New Chat')"></span>
+                            <span class="conv-time"
+                                  x-text="formatRelativeTime(conv.updated_at)"
+                                  :title="formatAbsoluteTime(conv.updated_at)"></span>
+                        </div>
+                        <button class="delete-btn" @click.stop="deleteConversation(conv.id)"
+                                title="Delete">
+                            <i data-lucide="trash-2" style="width:12px;height:12px;"></i>
+                        </button>
                     </div>
-                    <button class="delete-btn" @click.stop="deleteConversation(conv.id)"
-                            title="Delete">
-                        <i data-lucide="trash-2" style="width:12px;height:12px;"></i>
-                    </button>
+                    <template x-if="searching && searchHits[conv.id]">
+                        <div class="search-hits">
+                            <template x-for="hit in searchHits[conv.id].hits" :key="hit.msg_id">
+                                <div class="search-hit" :class="{ 'search-cursor': isSearchCursor(conv.id, hit.msg_id) }"
+                                     :data-search-key="conv.id + ':' + hit.msg_id"
+                                     @click="openSearchHit(conv.id, hit.msg_id)">
+                                    <span class="search-hit-text">
+                                        <span class="search-hit-role" x-text="hit.role === 'user' ? 'You' : 'AI'"></span>
+                                        <span x-html="highlightSearch(hit.snippet)"></span>
+                                    </span>
+                                </div>
+                            </template>
+                            <div class="search-more" x-show="searchHits[conv.id].match_count > searchHits[conv.id].hits.length"
+                                 x-text="'+' + (searchHits[conv.id].match_count - searchHits[conv.id].hits.length) + ' more in this chat'"></div>
+                        </div>
+                    </template>
                 </div>
             </template>
         </div>
@@ -1448,6 +1549,14 @@
             lastFolderContext: null,
             // Right-click context menu on a sidebar chat
             contextMenu: { open: false, x: 0, y: 0, conv: null },
+            // Sidebar search: titles filter locally as you type; message
+            // text matches come from /api/search a moment later.
+            searchQuery: '',
+            searchResults: [],      // [{conversation_id, match_count, hits: [{msg_id, role, snippet}]}]
+            searchLoading: false,
+            searchCursor: -1,       // index into searchEntries for arrow-key navigation
+            _searchTimer: null,
+            _searchSeq: 0,
 
             // Message tree
             messageTree: {},        // id → message
@@ -1547,6 +1656,22 @@
                 });
                 this.$watch('contextMenu.open', () => {
                     this.$nextTick(() => lucide.createIcons());
+                });
+                this.$watch('searchQuery', () => {
+                    this.$nextTick(() => lucide.createIcons());
+                });
+                this.$watch('searchResults', () => {
+                    this.$nextTick(() => lucide.createIcons());
+                });
+                window.addEventListener('keydown', (e) => {
+                    if ((e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === 'k') {
+                        e.preventDefault();
+                        // Focus now, not on the next tick, so keys typed right
+                        // after the shortcut land in the box.
+                        this.sidebarOpen = true;
+                        this.$refs.searchInput.focus();
+                        this.$refs.searchInput.select();
+                    }
                 });
             },
 
@@ -2287,7 +2412,7 @@
                 return text.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
             },
 
-            treeNavigate(msgId) {
+            treeNavigate(msgId, behavior = 'smooth') {
                 this.computeActivePath(msgId);
                 this.$nextTick(() => {
                     lucide.createIcons();
@@ -2295,7 +2420,7 @@
                     requestAnimationFrame(() => {
                         const el = document.querySelector(`[data-msg-id="${msgId}"]`);
                         if (el) {
-                            el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                            el.scrollIntoView({ behavior, block: 'start' });
                             // Brief highlight flash
                             el.style.transition = 'background 0.3s';
                             el.style.background = 'var(--accent-light)';
@@ -3094,6 +3219,133 @@
 
             get unfiledConversations() {
                 return this.conversations.filter(c => !c.folder_id);
+            },
+
+            // === Search ===
+
+            get searching() {
+                return this.searchQuery.trim() !== '';
+            },
+
+            get searchTerms() {
+                return this.searchQuery.trim().toLowerCase().split(/\s+/).filter(Boolean);
+            },
+
+            get searchHits() {
+                const byConv = {};
+                for (const r of this.searchResults) byConv[r.conversation_id] = r;
+                return byConv;
+            },
+
+            _matchesSearch(conv) {
+                if (this.searchHits[conv.id]) return true;
+                const title = (conv.title || 'New Chat').toLowerCase();
+                return this.searchTerms.every(t => title.includes(t));
+            },
+
+            visibleConvsInFolder(folderId) {
+                const convs = this.convsInFolder(folderId);
+                return this.searching ? convs.filter(c => this._matchesSearch(c)) : convs;
+            },
+
+            get visibleUnfiledConversations() {
+                const convs = this.unfiledConversations;
+                return this.searching ? convs.filter(c => this._matchesSearch(c)) : convs;
+            },
+
+            get visibleFolders() {
+                if (!this.searching) return this.folders;
+                return this.folders.filter(f => this.visibleConvsInFolder(f.id).length > 0);
+            },
+
+            // Results in on-screen order, flattened for arrow-key navigation:
+            // each chat followed by its message hits.
+            get searchEntries() {
+                if (!this.searching) return [];
+                const convs = [
+                    ...this.visibleFolders.flatMap(f => this.visibleConvsInFolder(f.id)),
+                    ...this.visibleUnfiledConversations,
+                ];
+                const entries = [];
+                for (const conv of convs) {
+                    entries.push({ key: conv.id, convId: conv.id, msgId: null });
+                    for (const hit of this.searchHits[conv.id]?.hits || []) {
+                        entries.push({ key: `${conv.id}:${hit.msg_id}`, convId: conv.id, msgId: hit.msg_id });
+                    }
+                }
+                return entries;
+            },
+
+            onSearchInput() {
+                this.searchCursor = -1;
+                clearTimeout(this._searchTimer);
+                const q = this.searchQuery.trim();
+                const seq = ++this._searchSeq;
+                // One letter matches nearly every message; titles are enough.
+                if (q.length < 2) {
+                    this.searchResults = [];
+                    this.searchLoading = false;
+                    return;
+                }
+                this.searchLoading = true;
+                this._searchTimer = setTimeout(async () => {
+                    try {
+                        const resp = await fetch(`/api/search?q=${encodeURIComponent(q)}`);
+                        if (seq !== this._searchSeq) return;  // a newer query superseded this one
+                        this.searchResults = resp.ok ? await resp.json() : [];
+                    } catch (e) {
+                        console.error('Search failed:', e);
+                    } finally {
+                        if (seq === this._searchSeq) this.searchLoading = false;
+                    }
+                }, 200);
+            },
+
+            clearSearch() {
+                this.searchQuery = '';
+                this.onSearchInput();
+            },
+
+            isSearchCursor(convId, msgId) {
+                const entry = this.searchEntries[this.searchCursor];
+                return !!entry && entry.convId === convId && entry.msgId === msgId;
+            },
+
+            moveSearchCursor(delta) {
+                const n = this.searchEntries.length;
+                if (n === 0) return;
+                this.searchCursor = Math.max(0, Math.min(n - 1, this.searchCursor + delta));
+                const key = this.searchEntries[this.searchCursor].key;
+                this.$nextTick(() => {
+                    document.querySelector(`[data-search-key="${key}"]`)
+                        ?.scrollIntoView({ block: 'nearest' });
+                });
+            },
+
+            openSearchCursor() {
+                const entry = this.searchEntries[Math.max(0, this.searchCursor)];
+                if (!entry) return;
+                if (entry.msgId) this.openSearchHit(entry.convId, entry.msgId);
+                else this.loadConversation(entry.convId);
+            },
+
+            async openSearchHit(convId, msgId) {
+                if (this.currentConversationId !== convId) await this.loadConversation(convId);
+                // The hit may be gone (deleted since the search ran). Jump
+                // instantly: a smooth scroll past long chats takes seconds.
+                if (this.messageTree[msgId]) this.treeNavigate(msgId, 'instant');
+            },
+
+            // Escapes text for x-html and marks every search term in it.
+            highlightSearch(text) {
+                const terms = this.searching ? this.searchTerms : [];
+                if (terms.length === 0) return this._escHtml(text);
+                const pattern = terms
+                    .map(t => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+                    .join('|');
+                return text.split(new RegExp(`(${pattern})`, 'gi'))
+                    .map((part, i) => i % 2 ? `<mark>${this._escHtml(part)}</mark>` : this._escHtml(part))
+                    .join('');
             },
 
             toggleFolder(folderId) {

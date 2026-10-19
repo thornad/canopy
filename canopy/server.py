@@ -320,6 +320,11 @@ async def delete_folder(folder_id: str):
 # --- Messages ---
 
 
+@app.get("/api/search")
+async def search(q: str = "", limit: int = 50):
+    return await db.search_messages(q, limit=max(1, min(limit, 200)))
+
+
 @app.post("/api/conversations/{conv_id}/messages", status_code=201)
 async def add_message(conv_id: str, body: MessageCreate):
     conv = await db.get_conversation(conv_id)

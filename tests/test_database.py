@@ -334,3 +334,105 @@ class TestMessageUsage:
         assert loaded["messages"][0]["usage"] is None
         new = await db.add_message("c", "assistant", "new", usage={"prompt_tokens": 1})
         assert (await db.get_conversation("c"))["messages"][1]["usage"] == {"prompt_tokens": 1}
+
+
+# --- Search ---
+
+
+class TestSearch:
+    async def test_finds_substring_case_insensitively(self):
+        conv = await db.create_conversation(title="Speech")
+        m1 = await db.add_message(conv["id"], "user", "Which model is VibeVoiceASR?")
+        await db.add_message(conv["id"], "assistant", "Unrelated", parent_id=m1["id"])
+
+        results = await db.search_messages("voiceasr")
+        assert len(results) == 1
+        assert results[0]["conversation_id"] == conv["id"]
+        assert results[0]["title"] == "Speech"
+        assert results[0]["match_count"] == 1
+        hit = results[0]["hits"][0]
+        assert hit["msg_id"] == m1["id"]
+        assert hit["role"] == "user"
+        assert "VibeVoiceASR" in hit["snippet"]
+
+    async def test_all_terms_must_match_one_message(self):
+        conv = await db.create_conversation()
+        await db.add_message(conv["id"], "user", "alpha only")
+        await db.add_message(conv["id"], "assistant", "beta only")
+        assert await db.search_messages("alpha beta") == []
+        both = await db.add_message(conv["id"], "user", "alpha and beta")
+        results = await db.search_messages("beta alpha")
+        assert [h["msg_id"] for h in results[0]["hits"]] == [both["id"]]
+
+    async def test_tool_output_is_not_searched(self):
+        conv = await db.create_conversation()
+        await db.add_message(conv["id"], "tool", "secret tool payload")
+        assert await db.search_messages("payload") == []
+
+    async def test_deletes_leave_the_index(self):
+        conv = await db.create_conversation()
+        m1 = await db.add_message(conv["id"], "user", "findme root")
+        await db.add_message(conv["id"], "assistant", "findme reply", parent_id=m1["id"])
+        other = await db.create_conversation()
+        await db.add_message(other["id"], "user", "findme elsewhere")
+
+        assert len(await db.search_messages("findme")) == 2
+        await db.delete_message_tree(m1["id"])
+        assert [r["conversation_id"] for r in await db.search_messages("findme")] == [other["id"]]
+        await db.delete_conversation(other["id"])
+        assert await db.search_messages("findme") == []
+
+    async def test_groups_hits_and_orders_by_recency(self):
+        old = await db.create_conversation(title="old")
+        for i in range(5):
+            await db.add_message(old["id"], "user", f"needle {i}")
+        new = await db.create_conversation(title="new")
+        await db.add_message(new["id"], "user", "needle new")
+
+        results = await db.search_messages("needle")
+        assert [r["title"] for r in results] == ["new", "old"]
+        assert results[1]["match_count"] == 5
+        assert len(results[1]["hits"]) == 3
+        assert len(await db.search_messages("needle", limit=1)) == 1
+
+    @pytest.mark.parametrize("query", ["", "   ", "a", '"', "-", "*", "%", "_", "\\", "NOT OR"])
+    async def test_odd_queries_do_not_raise(self, query):
+        conv = await db.create_conversation()
+        await db.add_message(conv["id"], "user", "plain text")
+        assert isinstance(await db.search_messages(query), list)
+
+    async def test_like_wildcards_are_literal(self):
+        conv = await db.create_conversation()
+        await db.add_message(conv["id"], "user", "plain text")
+        await db.add_message(conv["id"], "user", "save 50% now")
+        results = await db.search_messages("%")
+        assert [h["snippet"] for h in results[0]["hits"]] == ["save 50% now"]
+
+    async def test_snippet_is_trimmed_around_the_match(self):
+        conv = await db.create_conversation()
+        await db.add_message(conv["id"], "user", "x" * 500 + " target " + "y" * 500)
+        snippet = (await db.search_messages("target"))[0]["hits"][0]["snippet"]
+        assert snippet.startswith("…") and snippet.endswith("…")
+        assert "target" in snippet and len(snippet) < 200
+
+    async def test_existing_history_is_indexed_on_upgrade(self, tmp_path):
+        import aiosqlite
+
+        path = tmp_path / "pre-search.db"
+        await db.close_db()
+        await db.init_db(path)
+        conv = await db.create_conversation()
+        await db.add_message(conv["id"], "user", "history before search")
+        await db.close_db()
+        async with aiosqlite.connect(path) as old:
+            await old.executescript(
+                "DROP TRIGGER messages_fts_insert; DROP TRIGGER messages_fts_delete; "
+                "DROP TABLE messages_fts;"
+            )
+            await old.commit()
+
+        await db.init_db(path)
+        assert len(await db.search_messages("before")) == 1
+        await db.close_db()
+        await db.init_db(path)  # a restart must not index the history twice
+        assert (await db.search_messages("before"))[0]["match_count"] == 1

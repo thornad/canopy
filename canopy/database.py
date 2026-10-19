@@ -1,6 +1,7 @@
 """SQLite database for Canopy conversations and messages."""
 
 import json
+import re
 import time
 import uuid
 from pathlib import Path
@@ -172,6 +173,8 @@ async def init_db(db_path: Optional[Path] = None):
         "ON conversations(folder_id)"
     )
 
+    await _init_search_index(_db)
+
     # Seed default settings
     for key, value in DEFAULT_SETTINGS.items():
         await _db.execute(
@@ -179,6 +182,54 @@ async def init_db(db_path: Optional[Path] = None):
             (key, value),
         )
     await _db.commit()
+
+
+# Roles whose text is searchable. Tool results are mostly raw MCP output
+# (the bulk of the stored text) and would drown real matches.
+SEARCH_ROLES = ("user", "assistant")
+
+
+async def _init_search_index(db: aiosqlite.Connection):
+    """Create the message search index and its sync triggers.
+
+    A trigram FTS5 table matches any substring (like the browser's find),
+    so code, paths and partial words all hit. It keeps its own copy of the
+    text keyed by message id: messages has no stable integer rowid to link
+    an external-content index to. Messages are only ever inserted or
+    deleted, never edited, so two triggers keep it in step — including
+    deletes cascaded from a conversation.
+    """
+    cursor = await db.execute(
+        "SELECT 1 FROM sqlite_master WHERE name = 'messages_fts'"
+    )
+    exists = await cursor.fetchone() is not None
+    roles = ", ".join(f"'{r}'" for r in SEARCH_ROLES)
+    await db.executescript(
+        f"""
+        CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
+            content,
+            msg_id UNINDEXED,
+            conversation_id UNINDEXED,
+            tokenize = 'trigram'
+        );
+        CREATE TRIGGER IF NOT EXISTS messages_fts_insert
+        AFTER INSERT ON messages WHEN new.role IN ({roles}) BEGIN
+            INSERT INTO messages_fts (content, msg_id, conversation_id)
+            VALUES (new.content, new.id, new.conversation_id);
+        END;
+        CREATE TRIGGER IF NOT EXISTS messages_fts_delete
+        AFTER DELETE ON messages WHEN old.role IN ({roles}) BEGIN
+            DELETE FROM messages_fts WHERE msg_id = old.id;
+        END;
+        """
+    )
+    if not exists:
+        # First start with search: index the existing history once.
+        await db.execute(
+            "INSERT INTO messages_fts (content, msg_id, conversation_id) "
+            f"SELECT content, id, conversation_id FROM messages "
+            f"WHERE role IN ({roles}) AND content IS NOT NULL"
+        )
 
 
 async def close_db():
@@ -485,6 +536,84 @@ async def delete_message_tree(message_id: str) -> bool:
     await db.execute(f"DELETE FROM messages WHERE id IN ({placeholders})", to_delete)
     await db.commit()
     return True
+
+
+# --- Search ---
+
+_SNIPPET_BEFORE = 50
+_SNIPPET_AFTER = 110
+
+
+def _snippet(text: str, terms: list[str]) -> str:
+    """A short single-line excerpt of ``text`` around the first term hit."""
+    pattern = "|".join(re.escape(t) for t in terms)
+    m = re.search(pattern, text, re.IGNORECASE)
+    start = max(0, m.start() - _SNIPPET_BEFORE) if m else 0
+    end = min(len(text), (m.end() if m else 0) + _SNIPPET_AFTER)
+    out = " ".join(text[start:end].split())
+    if start > 0:
+        out = "…" + out
+    if end < len(text):
+        out += "…"
+    return out
+
+
+def _like_pattern(term: str) -> str:
+    escaped = term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    return f"%{escaped}%"
+
+
+async def search_messages(
+    query: str, limit: int = 50, hits_per_conversation: int = 3,
+) -> list[dict]:
+    """Find conversations whose user/assistant messages contain the query.
+
+    Every whitespace-separated term must appear (case-insensitively, as a
+    substring) in the same message. Results are grouped per conversation,
+    most recently updated first, each with up to ``hits_per_conversation``
+    snippets in message order.
+    """
+    terms = query.split()[:8]
+    if not terms:
+        return []
+    db = _get_db()
+    # LIKE on a trigram FTS5 column uses the index for terms of 3+ chars;
+    # shorter ones still work, as a scan.
+    where = " AND ".join("f.content LIKE ? ESCAPE '\\'" for _ in terms)
+    cursor = await db.execute(
+        "SELECT f.msg_id, f.conversation_id, f.content, m.role, "
+        "c.title, c.folder_id, c.updated_at "
+        "FROM messages_fts f "
+        "JOIN messages m ON m.id = f.msg_id "
+        "JOIN conversations c ON c.id = f.conversation_id "
+        f"WHERE {where} "
+        "ORDER BY c.updated_at DESC, m.created_at "
+        "LIMIT 2000",
+        [_like_pattern(t) for t in terms],
+    )
+    results: dict[str, dict] = {}
+    for row in await cursor.fetchall():
+        conv_id = row["conversation_id"]
+        conv = results.get(conv_id)
+        if conv is None:
+            if len(results) >= limit:
+                continue
+            conv = results[conv_id] = {
+                "conversation_id": conv_id,
+                "title": row["title"],
+                "folder_id": row["folder_id"],
+                "updated_at": row["updated_at"],
+                "match_count": 0,
+                "hits": [],
+            }
+        conv["match_count"] += 1
+        if len(conv["hits"]) < hits_per_conversation:
+            conv["hits"].append({
+                "msg_id": row["msg_id"],
+                "role": row["role"],
+                "snippet": _snippet(row["content"], terms),
+            })
+    return list(results.values())
 
 
 # --- Documents ---
