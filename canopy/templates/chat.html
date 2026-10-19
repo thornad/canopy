@@ -1644,6 +1644,13 @@
                 if (this.conversations.length > 0) {
                     await this.loadConversation(this.conversations[0].id);
                 }
+                // Earlier versions allowed several open folders; keep only
+                // the current chat's folder if it was open, else the first.
+                const open = Object.keys(this.expandedFolders).filter(id => this.expandedFolders[id]);
+                if (open.length > 1) {
+                    const cur = this.conversations.find(c => c.id === this.currentConversationId);
+                    this._setOpenFolder(open.includes(cur?.folder_id) ? cur.folder_id : open[0]);
+                }
                 this.applyTheme();
                 this.setupScrollListener();
                 this.loadOmlxStats();
@@ -2132,7 +2139,7 @@
                         this.activePath = [];
                         this.pendingDocuments = [];
                         if (targetFolderId) {
-                            this.expandedFolders[targetFolderId] = true;
+                            this._setOpenFolder(targetFolderId);
                             await this.moveConversationToFolder(conv, targetFolderId);
                         }
                     }
@@ -3468,12 +3475,18 @@
             },
 
             toggleFolder(folderId) {
-                this.expandedFolders[folderId] = !this.expandedFolders[folderId];
-                if (this.expandedFolders[folderId]) {
+                const opening = !this.expandedFolders[folderId];
+                this._setOpenFolder(opening ? folderId : null);
+                if (opening) {
                     this.lastFolderContext = folderId;
                 } else if (this.lastFolderContext === folderId) {
                     this.lastFolderContext = null;
                 }
+            },
+
+            // Folders work as an accordion: opening one closes the rest.
+            _setOpenFolder(folderId) {
+                this.expandedFolders = folderId ? { [folderId]: true } : {};
                 try {
                     localStorage.setItem(
                         'canopy-expanded-folders',
@@ -3497,8 +3510,7 @@
                     this.folders.push(folder);
                     this.folders.sort((a, b) =>
                         a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }));
-                    this.expandedFolders[folder.id] = true;
-                    this.$nextTick(() => lucide.createIcons());
+                    this._setOpenFolder(folder.id);
                     return folder;
                 } catch (e) {
                     console.error('Failed to create folder:', e);
@@ -3553,7 +3565,7 @@
                     });
                     if (resp.ok) {
                         conv.folder_id = folderId;
-                        if (folderId) this.expandedFolders[folderId] = true;
+                        if (folderId) this._setOpenFolder(folderId);
                     }
                 } catch (e) { console.error('Failed to move conversation:', e); }
             },
