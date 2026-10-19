@@ -1554,14 +1554,17 @@
             lastFolderContext: null,
             // Right-click context menu on a sidebar chat
             contextMenu: { open: false, x: 0, y: 0, conv: null },
-            // Sidebar search: titles filter locally as you type; message
-            // text matches come from /api/search a moment later.
+            // Sidebar search. searchQuery is what's in the box; nothing reacts
+            // to it until typing pauses, then appliedQuery takes it and the
+            // title filter, message hits and in-chat highlights update at once.
             searchQuery: '',
+            appliedQuery: '',
             searchResults: [],      // [{conversation_id, match_count, hits: [{msg_id, role, snippet}]}]
             searchLoading: false,
             searchCursor: -1,       // index into searchEntries for arrow-key navigation
             _searchTimer: null,
             _searchSeq: 0,
+            _inflightSearch: null,  // {q, promise} of the request being awaited
             _docHighlightTimer: null,
             _docHighlightScrollTo: null,   // message whose first match to scroll to
 
@@ -1664,13 +1667,13 @@
                 this.$watch('contextMenu.open', () => {
                     this.$nextTick(() => lucide.createIcons());
                 });
-                this.$watch('searchQuery', () => {
+                this.$watch('appliedQuery', () => {
                     this.$nextTick(() => lucide.createIcons());
                 });
                 this.$watch('searchResults', () => {
                     this.$nextTick(() => lucide.createIcons());
                 });
-                this.$watch('searchQuery', () => this._scheduleDocHighlights());
+                this.$watch('appliedQuery', () => this._scheduleDocHighlights());
                 this.$watch('activePath', () => this._scheduleDocHighlights());
                 window.addEventListener('keydown', (e) => {
                     if ((e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === 'k') {
@@ -3233,13 +3236,13 @@
             // === Search ===
 
             get searching() {
-                return this.searchQuery.trim() !== '';
+                return this.appliedQuery !== '';
             },
 
             // The query as a phrase: its words in order, any whitespace
             // between them (matches the server's rule).
             get searchPattern() {
-                const words = this.searchQuery.trim().split(/\s+/).filter(Boolean);
+                const words = this.appliedQuery.split(/\s+/).filter(Boolean);
                 return words.map(w => w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('\\s+');
             },
 
@@ -3293,29 +3296,57 @@
                 return entries;
             },
 
+            // Waits for a pause in typing so each keystroke doesn't refilter
+            // the sidebar or hit the server.
             onSearchInput() {
-                this.searchCursor = -1;
                 clearTimeout(this._searchTimer);
                 const q = this.searchQuery.trim();
-                const seq = ++this._searchSeq;
-                // One letter matches nearly every message; titles are enough.
-                if (q.length < 2) {
-                    this.searchResults = [];
+                if (q === this.appliedQuery) {
                     this.searchLoading = false;
                     return;
                 }
+                if (!q) return this._applySearch();  // cleared: no reason to wait
                 this.searchLoading = true;
-                this._searchTimer = setTimeout(async () => {
+                this._searchTimer = setTimeout(() => this._applySearch(), 300);
+            },
+
+            // Runs the query now; resolves once results are on screen. A
+            // request already in flight for the same text is reused, so
+            // quick ↓ ↓ Enter presses don't each send it again.
+            _applySearch() {
+                clearTimeout(this._searchTimer);
+                const q = this.searchQuery.trim();
+                if (this._inflightSearch?.q === q) return this._inflightSearch.promise;
+                const promise = this._runSearch(q).finally(() => {
+                    if (this._inflightSearch?.promise === promise) this._inflightSearch = null;
+                });
+                this._inflightSearch = { q, promise };
+                return promise;
+            },
+
+            async _runSearch(q) {
+                const seq = ++this._searchSeq;
+                let results = [];
+                // One letter matches nearly every message; titles are enough.
+                if (q.length >= 2) {
+                    this.searchLoading = true;
                     try {
                         const resp = await fetch(`/api/search?q=${encodeURIComponent(q)}`);
-                        if (seq !== this._searchSeq) return;  // a newer query superseded this one
-                        this.searchResults = resp.ok ? await resp.json() : [];
+                        if (resp.ok) results = await resp.json();
                     } catch (e) {
                         console.error('Search failed:', e);
-                    } finally {
-                        if (seq === this._searchSeq) this.searchLoading = false;
                     }
-                }, 200);
+                    if (seq !== this._searchSeq) return;  // a newer query superseded this one
+                }
+                this.searchResults = results;
+                this.appliedQuery = q;
+                this.searchCursor = -1;
+                this.searchLoading = false;
+            },
+
+            // Enter and the arrow keys shouldn't act on a stale result list.
+            async _flushPendingSearch() {
+                if (this.searchQuery.trim() !== this.appliedQuery) await this._applySearch();
             },
 
             clearSearch() {
@@ -3328,7 +3359,8 @@
                 return !!entry && entry.convId === convId && entry.msgId === msgId;
             },
 
-            moveSearchCursor(delta) {
+            async moveSearchCursor(delta) {
+                await this._flushPendingSearch();
                 const n = this.searchEntries.length;
                 if (n === 0) return;
                 this.searchCursor = Math.max(0, Math.min(n - 1, this.searchCursor + delta));
@@ -3339,7 +3371,8 @@
                 });
             },
 
-            openSearchCursor() {
+            async openSearchCursor() {
+                await this._flushPendingSearch();
                 const entry = this.searchEntries[Math.max(0, this.searchCursor)];
                 if (!entry) return;
                 if (entry.msgId) this.openSearchHit(entry.convId, entry.msgId);
