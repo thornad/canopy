@@ -429,7 +429,7 @@ def _path_to_openai_messages(
 
 
 def _omit_earlier_tool_results(settings: dict) -> bool:
-    return settings.get("earlier_tool_results", "full") == "omit"
+    return settings.get("earlier_tool_results", "omit") == "omit"
 
 
 MCP_MAX_TURNS = 10

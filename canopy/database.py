@@ -90,8 +90,9 @@ DEFAULT_SETTINGS = {
     "theme": "light",
     "system_prompt": "",
     # Tool results from questions before the latest one: "full" replays them,
-    # "omit" swaps in a placeholder to keep follow-up prompts small.
-    "earlier_tool_results": "full",
+    # "omit" swaps in a placeholder to keep follow-up prompts small. Models
+    # tend to search again for each new question anyway, so "omit" is the default.
+    "earlier_tool_results": "omit",
 }
 
 
