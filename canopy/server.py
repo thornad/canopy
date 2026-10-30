@@ -364,9 +364,16 @@ def _is_content_parts(value) -> bool:
     )
 
 
+def _split_reasoning(content: str) -> tuple[str, str]:
+    """Split saved assistant content into (reasoning, visible text)."""
+    reasoning = "".join(re.findall(r"<think>([\s\S]*?)</think>", content))
+    text = re.sub(r"<think>[\s\S]*?</think>", "", content).lstrip("\n")
+    return reasoning, text
+
+
 def _path_to_openai_messages(
     path: list[dict],
-    strip_reasoning: bool = False,
+    reasoning_field: bool = False,
     omit_earlier_tool_results: bool = False,
 ) -> list[dict]:
     """Rebuild an OpenAI-style messages array from a DB path.
@@ -376,10 +383,11 @@ def _path_to_openai_messages(
     oMLX saw originally — otherwise the cache hashes diverge after any
     tool-calling turn.
 
-    ``strip_reasoning`` removes ``<think>...</think>`` blocks from assistant
-    content. Canopy stores reasoning inline in the saved content; oMLX replays
-    it fine, but DS4 streams reasoning as a native block and does not expect
-    prior inline think on replay, so the DS4 chat path strips it.
+    ``reasoning_field`` moves ``<think>...</think>`` blocks out of assistant
+    content into ``reasoning_content``. Canopy stores reasoning inline in the
+    saved content; oMLX replays it fine, while DS4 reads prior reasoning from
+    that field and its chat template decides which turns keep it (GLM keeps
+    every tool-calling turn's reasoning).
 
     Tool results replay as the exact text the live tool loop sent. Many MCP
     tools return JSON *text* (e.g. a list of search hits); parsing that into a
@@ -408,9 +416,10 @@ def _path_to_openai_messages(
                 "content": content,
             })
             continue
+        reasoning = ""
         if isinstance(content, str):
-            if strip_reasoning and role == "assistant" and "<think>" in content:
-                content = re.sub(r"<think>[\s\S]*?</think>", "", content).lstrip("\n")
+            if reasoning_field and role == "assistant" and "<think>" in content:
+                reasoning, content = _split_reasoning(content)
             try:
                 parsed = json.loads(content)
                 if _is_content_parts(parsed):
@@ -418,6 +427,8 @@ def _path_to_openai_messages(
             except (json.JSONDecodeError, TypeError):
                 pass
         entry: dict = {"role": role, "content": content}
+        if reasoning:
+            entry["reasoning_content"] = reasoning
         raw_tc = msg.get("tool_calls")
         if raw_tc:
             try:
@@ -495,7 +506,7 @@ async def _generate_with_tools(
     tool_specs: list[dict],
     omlx_url: str,
     headers: dict,
-    send_reasoning: bool = True,
+    reasoning_field: bool = False,
 ):
     """Iterative tool-calling loop with streaming pass-through.
 
@@ -506,11 +517,12 @@ async def _generate_with_tools(
     we dispatch them via MCP, append the tool messages, and loop. When it
     finishes with ``stop`` we save the final message and emit ``done``.
 
-    Each turn is saved with its own reasoning, and with ``send_reasoning`` the
-    next turn gets it back. Templates such as GLM's keep the reasoning of every
-    tool-calling turn; without it the model saw its earlier turns as empty
-    ``<think></think>`` and re-planned from scratch each turn. DS4 does not
-    expect prior reasoning, so its loop sends only the text, as its replay does.
+    Each turn is saved with its own reasoning and sent back on the next turn:
+    inline as ``<think>`` for oMLX, or with ``reasoning_field`` as
+    ``reasoning_content``, which DS4 reads. Templates such as GLM's keep the
+    reasoning of every tool-calling turn; without it the model saw its earlier
+    turns as empty ``<think></think>``, re-planned from scratch each turn and
+    soon stopped reasoning at all.
     """
     final_reasoning = ""
     final_content = ""
@@ -596,16 +608,18 @@ async def _generate_with_tools(
                 if finish_reason == "tool_calls" and turn_tool_calls:
                     tool_calls_list = [turn_tool_calls[i] for i in sorted(turn_tool_calls)]
                     saved_content = _with_reasoning(turn_reasoning, turn_content)
-                    messages.append(
-                        {
-                            "role": "assistant",
-                            "content": saved_content if send_reasoning else turn_content,
-                            "tool_calls": tool_calls_list,
-                        }
-                    )
+                    sent: dict = {"role": "assistant", "tool_calls": tool_calls_list}
+                    if reasoning_field:
+                        sent["content"] = turn_content
+                        if turn_reasoning:
+                            sent["reasoning_content"] = turn_reasoning
+                    else:
+                        sent["content"] = saved_content
+                    messages.append(sent)
                     # Persist the assistant turn so the prompt path replays the
-                    # same text this loop sends next (DS4 replay strips the
-                    # reasoning again), keeping oMLX's cache valid.
+                    # same text this loop sends next (DS4 replay moves the
+                    # reasoning back into reasoning_content), keeping the
+                    # backend's prompt cache valid.
                     assistant_msg = await db.add_message(
                         conversation_id=body.conversation_id,
                         role="assistant",
@@ -712,7 +726,7 @@ async def chat_proxy(body: ChatRequest):
     messages.extend(
         _path_to_openai_messages(
             path,
-            strip_reasoning=_backend["type"] == "ds4",
+            reasoning_field=_backend["type"] == "ds4",
             omit_earlier_tool_results=_omit_earlier_tool_results(settings),
         )
     )
@@ -727,7 +741,7 @@ async def chat_proxy(body: ChatRequest):
         return StreamingResponse(
             _generate_with_tools(
                 body, messages, tool_specs, omlx_url, headers,
-                send_reasoning=_backend["type"] != "ds4",
+                reasoning_field=_backend["type"] == "ds4",
             ),
             media_type="text/event-stream",
         )

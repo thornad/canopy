@@ -58,13 +58,13 @@ def fake_omlx(monkeypatch):
     return requests
 
 
-async def _run(send_reasoning: bool) -> list[dict]:
+async def _run(reasoning_field: bool = False) -> list[dict]:
     conv = await db.create_conversation()
     user = await db.add_message(conv["id"], "user", "what is karma?")
     body = ChatRequest(conversation_id=conv["id"], parent_id=user["id"], model="m")
     messages = [{"role": "user", "content": "what is karma?"}]
     final_id = None
-    async for event in _generate_with_tools(body, messages, [], "http://omlx", {}, send_reasoning=send_reasoning):
+    async for event in _generate_with_tools(body, messages, [], "http://omlx", {}, reasoning_field=reasoning_field):
         if '"type": "done"' in event:
             final_id = json.loads(event[len("data: "):])["message_id"]
     return await db.get_message_path(final_id)
@@ -75,28 +75,31 @@ def _second_request_assistant(requests: list[dict]) -> dict:
 
 
 async def test_tool_turn_reasoning_is_sent_back_on_the_next_turn(fake_omlx):
-    await _run(send_reasoning=True)
+    await _run()
     assert _second_request_assistant(fake_omlx)["content"] == "<think>I should search for karma.</think>"
 
 
 async def test_each_turn_is_saved_with_only_its_own_reasoning(fake_omlx):
-    path = await _run(send_reasoning=True)
+    path = await _run()
     tool_turn, final = path[1], path[-1]
     assert tool_turn["content"] == "<think>I should search for karma.</think>"
     assert final["content"] == "<think>The results suffice.</think>Karma is..."
 
 
 async def test_replay_matches_what_the_loop_sent(fake_omlx):
-    path = await _run(send_reasoning=True)
+    path = await _run()
     replayed = _path_to_openai_messages(path[:-1])
     sent = fake_omlx[1]["messages"]
     assert [m["content"] for m in replayed] == [m["content"] for m in sent]
 
 
-async def test_ds4_loop_sends_no_reasoning_and_its_replay_matches(fake_omlx):
-    path = await _run(send_reasoning=False)
-    assert _second_request_assistant(fake_omlx)["content"] == ""
-    replayed = _path_to_openai_messages(path[:-1], strip_reasoning=True)
-    assert [m["content"] for m in replayed] == [m["content"] for m in fake_omlx[1]["messages"]]
-    # Still saved, for display.
+async def test_ds4_loop_sends_reasoning_as_a_field_and_its_replay_matches(fake_omlx):
+    path = await _run(reasoning_field=True)
+    sent = _second_request_assistant(fake_omlx)
+    assert sent["content"] == ""
+    assert sent["reasoning_content"] == "I should search for karma."
+    replayed = _path_to_openai_messages(path[:-1], reasoning_field=True)
+    fields = lambda ms: [(m["content"], m.get("reasoning_content")) for m in ms]
+    assert fields(replayed) == fields(fake_omlx[1]["messages"])
+    # Saved inline, for display.
     assert path[1]["content"] == "<think>I should search for karma.</think>"
