@@ -484,12 +484,18 @@ class UsageTotals:
         return out
 
 
+def _with_reasoning(reasoning: str, content: str) -> str:
+    """Saved form of an assistant turn: its reasoning inline, then its text."""
+    return f"<think>{reasoning}</think>{content}" if reasoning else content
+
+
 async def _generate_with_tools(
     body: ChatRequest,
     messages: list[dict],
     tool_specs: list[dict],
     omlx_url: str,
     headers: dict,
+    send_reasoning: bool = True,
 ):
     """Iterative tool-calling loop with streaming pass-through.
 
@@ -499,8 +505,14 @@ async def _generate_with_tools(
     ``tool_calls`` across deltas; when a turn finishes with ``tool_calls``
     we dispatch them via MCP, append the tool messages, and loop. When it
     finishes with ``stop`` we save the final message and emit ``done``.
+
+    Each turn is saved with its own reasoning, and with ``send_reasoning`` the
+    next turn gets it back. Templates such as GLM's keep the reasoning of every
+    tool-calling turn; without it the model saw its earlier turns as empty
+    ``<think></think>`` and re-planned from scratch each turn. DS4 does not
+    expect prior reasoning, so its loop sends only the text, as its replay does.
     """
-    accumulated_reasoning = ""
+    final_reasoning = ""
     final_content = ""
     usage_total = UsageTotals()
     # Walk the parent chain as we save each intermediate turn so a future
@@ -581,26 +593,23 @@ async def _generate_with_tools(
                         if fr:
                             finish_reason = fr
 
-                accumulated_reasoning += turn_reasoning
-
                 if finish_reason == "tool_calls" and turn_tool_calls:
                     tool_calls_list = [turn_tool_calls[i] for i in sorted(turn_tool_calls)]
+                    saved_content = _with_reasoning(turn_reasoning, turn_content)
                     messages.append(
                         {
                             "role": "assistant",
-                            "content": turn_content,
+                            "content": saved_content if send_reasoning else turn_content,
                             "tool_calls": tool_calls_list,
                         }
                     )
                     # Persist the assistant turn so the prompt path replays the
-                    # same token sequence oMLX just cached. We deliberately
-                    # strip any reasoning_content from the saved content — the
-                    # next turn sends only the visible text + tool_calls,
-                    # which is what oMLX's cache was keyed on.
+                    # same text this loop sends next (DS4 replay strips the
+                    # reasoning again), keeping oMLX's cache valid.
                     assistant_msg = await db.add_message(
                         conversation_id=body.conversation_id,
                         role="assistant",
-                        content=turn_content,
+                        content=saved_content,
                         parent_id=current_parent,
                         model=body.model,
                         tool_calls=tool_calls_list,
@@ -641,6 +650,7 @@ async def _generate_with_tools(
                     continue
 
                 # No tool calls → this turn produced the final answer.
+                final_reasoning = turn_reasoning
                 final_content = turn_content
                 break
             else:
@@ -659,10 +669,9 @@ async def _generate_with_tools(
 
     yield "data: [DONE]\n\n"
 
-    full_content = ""
-    if accumulated_reasoning:
-        full_content += f"<think>{accumulated_reasoning}</think>"
-    full_content += final_content
+    # Only the final turn's reasoning: earlier turns' reasoning is on their own
+    # rows, so the next question replays exactly what the model wrote.
+    full_content = _with_reasoning(final_reasoning, final_content)
 
     if full_content:
         saved = await db.add_message(
@@ -716,7 +725,10 @@ async def chat_proxy(body: ChatRequest):
 
     if tool_specs:
         return StreamingResponse(
-            _generate_with_tools(body, messages, tool_specs, omlx_url, headers),
+            _generate_with_tools(
+                body, messages, tool_specs, omlx_url, headers,
+                send_reasoning=_backend["type"] != "ds4",
+            ),
             media_type="text/event-stream",
         )
 

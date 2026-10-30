@@ -1052,7 +1052,7 @@
                                             </button>
                                         </div>
                                     </div>
-                                    <div class="msg-body markdown-content" x-html="renderMarkdown(msg.content)"></div>
+                                    <div class="msg-body markdown-content" x-html="renderMarkdown(withRoundThinking(msg, idx))"></div>
                                     <div class="msg-stats">
                                         <span x-show="msg.usage?.prompt_tokens" title="Prompt tokens (context sent) and prompt processing speed in tokens/s (uncached tokens only)">
                                             <i data-lucide="arrow-up" style="width:10px;height:10px;"></i>
@@ -3655,6 +3655,20 @@
                 } catch (e) {
                     return text.replace(/</g, '&lt;').replace(/>/g, '&gt;');
                 }
+            },
+
+            // The answer's content, preceded by the thinking of the tool-calling
+            // rounds that led to it. Each round's reasoning is saved on its own
+            // (hidden) row so replays match what the model saw.
+            withRoundThinking(msg, idx) {
+                let thinking = '';
+                for (let i = idx - 1; i >= 0; i--) {
+                    const m = this.activePath[i];
+                    if (m.role === 'tool') continue;
+                    if (m.role !== 'assistant' || !m.tool_calls) break;
+                    thinking = ((m.content || '').match(/<think>[\s\S]*?<\/think[^>]*>/g) || []).join('') + thinking;
+                }
+                return thinking + (msg.content || '');
             },
 
             extractThinking(text) {
