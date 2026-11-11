@@ -139,6 +139,14 @@ def _mcp_row_out(row: dict) -> dict:
     }
 
 
+async def _persist_mcp(renamed: Optional[dict[str, str]] = None):
+    """Mirror UI changes into mcp.json, which is re-read on every start."""
+    try:
+        await db.write_mcp_json(MCP_JSON_PATH, renamed)
+    except Exception as e:
+        print(f"[mcp] failed to write {MCP_JSON_PATH}: {e}")
+
+
 async def _resync_mcp():
     try:
         await mcp_registry.sync(await db.list_mcp_servers())
@@ -172,6 +180,7 @@ async def add_mcp(body: MCPServerCreate):
         )
     except Exception as e:
         raise HTTPException(400, f"Could not add server: {e}")
+    await _persist_mcp()
     await _resync_mcp()
     status = mcp_registry.server_status().get(
         server["name"], {"running": False, "tool_count": 0, "tools": []}
@@ -192,9 +201,12 @@ async def patch_mcp(server_id: str, body: MCPServerUpdate):
         updates["env"] = parse_env_string(body.env)
     if body.enabled is not None:
         updates["enabled"] = body.enabled
+    before = await db.get_mcp_server(server_id)
     server = await db.update_mcp_server(server_id, **updates)
-    if server is None:
+    if server is None or before is None:
         raise HTTPException(404, "MCP server not found")
+    renamed = {before["name"]: server["name"]} if before["name"] != server["name"] else None
+    await _persist_mcp(renamed)
     await _resync_mcp()
     status = mcp_registry.server_status().get(
         server["name"], {"running": False, "tool_count": 0, "tools": []}
@@ -207,6 +219,7 @@ async def delete_mcp(server_id: str):
     ok = await db.delete_mcp_server(server_id)
     if not ok:
         raise HTTPException(404, "MCP server not found")
+    await _persist_mcp()
     await _resync_mcp()
     return {"deleted": True}
 

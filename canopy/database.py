@@ -798,3 +798,48 @@ async def sync_mcp_from_json(path: Path) -> dict:
             removed += 1
 
     return {"added": added, "updated": updated, "removed": removed}
+
+
+async def write_mcp_json(path: Path, renamed: Optional[dict[str, str]] = None) -> None:
+    """Write the mcp_servers table back to ``path`` so UI edits survive restarts.
+
+    Inverse of :func:`sync_mcp_from_json`. Keys Canopy does not manage are
+    kept: other top-level keys, and per-server keys such as ``type`` or
+    ``timeout``. ``renamed`` maps old → new server names so a renamed server
+    keeps its extra keys. The enabled state is only written when the entry
+    already carries ``enabled`` / ``disabled``; otherwise it stays in the DB,
+    as on load. The file is replaced atomically.
+    """
+    data: dict = {}
+    if path.exists():
+        try:
+            data = json.loads(path.read_text())
+        except (json.JSONDecodeError, OSError):
+            data = {}
+        if not isinstance(data, dict):
+            data = {}
+    key = "servers" if "servers" in data and "mcpServers" not in data else "mcpServers"
+    old_spec = data.get(key) if isinstance(data.get(key), dict) else {}
+    renamed_back = {new: old for old, new in (renamed or {}).items()}
+
+    spec: dict = {}
+    for s in await list_mcp_servers():
+        prev = old_spec.get(renamed_back.get(s["name"], s["name"]))
+        conf = dict(prev) if isinstance(prev, dict) else {}
+        conf["command"] = s["command"]
+        conf["args"] = list(s["args"])
+        if s["env"]:
+            conf["env"] = dict(s["env"])
+        else:
+            conf.pop("env", None)
+        if "disabled" in conf:
+            conf["disabled"] = not s["enabled"]
+        if "enabled" in conf:
+            conf["enabled"] = bool(s["enabled"])
+        spec[s["name"]] = conf
+    data[key] = spec
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(data, indent=2) + "\n")
+    tmp.replace(path)

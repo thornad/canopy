@@ -286,6 +286,54 @@ class TestMcpJsonSync:
         assert await self._enabled() == {"a": False}
 
 
+class TestMcpJsonWriteBack:
+    async def test_ui_changes_survive_restart(self, tmp_path):
+        import json
+
+        path = tmp_path / "mcp.json"
+        path.write_text(json.dumps({"mcpServers": {"a": {"command": "x"}, "gone": {"command": "z"}}}))
+        await db.sync_mcp_from_json(path)
+        servers = {s["name"]: s for s in await db.list_mcp_servers()}
+        await db.update_mcp_server(servers["a"]["id"], args=["--new"], env={"K": "v"})
+        await db.delete_mcp_server(servers["gone"]["id"])
+        await db.add_mcp_server(name="b", command="y", args=[], env={}, enabled=True)
+        await db.write_mcp_json(path)
+
+        stats = await db.sync_mcp_from_json(path)  # next server start
+
+        assert stats == {"added": 0, "updated": 0, "removed": 0}
+        assert json.loads(path.read_text()) == {"mcpServers": {
+            "a": {"command": "x", "args": ["--new"], "env": {"K": "v"}},
+            "b": {"command": "y", "args": []},
+        }}
+
+    async def test_unmanaged_keys_kept_and_rename_carries_them(self, tmp_path):
+        import json
+
+        path = tmp_path / "mcp.json"
+        path.write_text(json.dumps({
+            "other": 1,
+            "mcpServers": {"a": {"command": "x", "timeout": 30, "disabled": True}},
+        }))
+        await db.sync_mcp_from_json(path)
+        a = (await db.list_mcp_servers())[0]
+        await db.update_mcp_server(a["id"], name="renamed", enabled=True)
+        await db.write_mcp_json(path, renamed={"a": "renamed"})
+
+        assert json.loads(path.read_text()) == {
+            "other": 1,
+            "mcpServers": {"renamed": {"command": "x", "timeout": 30, "disabled": False, "args": []}},
+        }
+
+    async def test_creates_file_when_missing(self, tmp_path):
+        import json
+
+        path = tmp_path / "sub" / "mcp.json"
+        await db.add_mcp_server(name="a", command="x", args=["1"], env={}, enabled=False)
+        await db.write_mcp_json(path)
+        assert json.loads(path.read_text()) == {"mcpServers": {"a": {"command": "x", "args": ["1"]}}}
+
+
 # --- Reply stats ---
 
 
